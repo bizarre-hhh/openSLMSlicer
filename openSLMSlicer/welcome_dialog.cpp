@@ -46,7 +46,7 @@ WelcomeDialog::WelcomeDialog(const QString& recent_projects_file)
 {
     setObjectName(QStringLiteral("welcomeDialog"));
     setFont(QFont(QStringLiteral("Microsoft YaHei"), 12));
-    setWindowTitle(QStringLiteral("欢迎使用 glSceneEditor"));
+    setWindowTitle(QStringLiteral("欢迎使用 openSLMSlicer"));
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
     resize(1160, 900);
     setMinimumSize(1000, 860);
@@ -78,7 +78,7 @@ WelcomeDialog::WelcomeDialog(const QString& recent_projects_file)
     auto* card_layout = new QVBoxLayout(card);
     card_layout->setContentsMargins(36, 28, 36, 24);
     card_layout->setSpacing(16);
-    auto* title = new QLabel(QStringLiteral("欢迎使用 glSceneEditor"), card);
+    auto* title = new QLabel(QStringLiteral("欢迎使用 openSLMSlicer"), card);
     title->setObjectName(QStringLiteral("welcomeTitle"));
     title->setAlignment(Qt::AlignCenter);
     card_layout->addWidget(title);

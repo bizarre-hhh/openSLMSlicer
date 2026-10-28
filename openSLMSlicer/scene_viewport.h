@@ -19,6 +19,7 @@
 #include "project_file.h"
 #include "model_transform.h"
 #include "slice_engine.h"
+#include "slice_export.h"
 
 class BasePlate;
 class Shader;
@@ -67,6 +68,7 @@ public:
     struct SlicePreviewInfo
     {
         bool has_preview = false;
+        bool loaded_from_file = false;
         bool visible = false;
         bool contours_visible = false;
         bool hatches_visible = false;
@@ -175,6 +177,13 @@ public:
     bool ModelsHidden() const { return models_hidden_; }
     bool SetSliceLayer(std::size_t index);
     SlicePreviewInfo SliceInfo() const;
+    // Snapshot of the current preview for exporters. Empty Z grid layers
+    // between the first and last non-empty layer are included.
+    SliceBuildSnapshot BuildSliceExportSnapshot() const;
+    // Replace the preview with a previously exported .slmslice snapshot. Empty
+    // grid layers are kept in the stored snapshot but omitted from the layer
+    // slider (they contain no drawable geometry).
+    bool LoadSlicePreview(const SliceBuildSnapshot& snapshot, QString& error);
     std::uint64_t SliceRevision() const { return slice_revision_; }
     bool ConsumeSliceInvalidation();
 
@@ -323,6 +332,7 @@ private:
     double slice_total_path_length_mm_ = 0.0;
     SliceSettings slice_applied_settings_;
     std::uint64_t slice_source_project_revision_ = 0;
+    std::optional<SliceBuildSnapshot> loaded_slice_snapshot_;
     std::uint64_t slice_revision_ = 0;
     bool slice_invalidated_ = false;
     std::vector<ModelEntry> models_;

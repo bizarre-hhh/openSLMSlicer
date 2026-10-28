@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(glSceneEditor LANGUAGES C CXX)
+project(openSLMSlicer LANGUAGES C CXX)
 
 include(qt.cmake)
 
@@ -76,8 +76,13 @@ set(PROJECT_SOURCES
   "recent_projects.cpp"
   "welcome_dialog.cpp"
   "scene_editor_window.cpp"
+  "export_slice_dialog.cpp"
+  "slice_file_info_dialog.cpp"
   "scene_viewport.cpp"
   "slice_engine.cpp"
+  "slice_export.cpp"
+  "slmslice_format.cpp"
+  "cli_format.cpp"
   "camera_controller.cpp"
   "view_cube.cpp"
   "${IMGUI_DIR}/imgui.cpp"
@@ -91,9 +96,9 @@ set(PROJECT_SOURCES
   "${STB_IMAGE_DIR}/src/stb_image.cpp"
 )
 
-qt_add_executable(glSceneEditor ${PROJECT_SOURCES})
+qt_add_executable(openSLMSlicer ${PROJECT_SOURCES})
 
-target_include_directories(glSceneEditor PRIVATE
+target_include_directories(openSLMSlicer PRIVATE
   "${APP_SOURCE_DIR}"
   "${IMGUIZMO_DIR}"
   "${IMGUI_DIR}"
@@ -105,11 +110,11 @@ target_include_directories(glSceneEditor PRIVATE
   "${PYSLM_DIR}/include"
 )
 
-target_compile_definitions(glSceneEditor PRIVATE _CRT_SECURE_NO_WARNINGS)
+target_compile_definitions(openSLMSlicer PRIVATE _CRT_SECURE_NO_WARNINGS)
 if (MSVC)
-  target_compile_options(glSceneEditor PRIVATE /utf-8)
+  target_compile_options(openSLMSlicer PRIVATE /utf-8)
 endif()
-target_link_libraries(glSceneEditor PRIVATE
+target_link_libraries(openSLMSlicer PRIVATE
   glfw
   OpenGL::GL
   imm32
@@ -120,12 +125,12 @@ target_link_libraries(glSceneEditor PRIVATE
 )
 
 if (WIN32)
-  set_target_properties(glSceneEditor PROPERTIES WIN32_EXECUTABLE TRUE)
+  set_target_properties(openSLMSlicer PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 
-set(MODEL_RESOURCE_OUTPUT_DIR "$<TARGET_FILE_DIR:glSceneEditor>/resources/asset/backpack")
-set(SHADER_RESOURCE_OUTPUT_DIR "$<TARGET_FILE_DIR:glSceneEditor>/resources/shaders")
-add_custom_command(TARGET glSceneEditor POST_BUILD
+set(MODEL_RESOURCE_OUTPUT_DIR "$<TARGET_FILE_DIR:openSLMSlicer>/resources/asset/backpack")
+set(SHADER_RESOURCE_OUTPUT_DIR "$<TARGET_FILE_DIR:openSLMSlicer>/resources/shaders")
+add_custom_command(TARGET openSLMSlicer POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${CMAKE_CURRENT_SOURCE_DIR}/../asset/backpack"
     "${MODEL_RESOURCE_OUTPUT_DIR}"
@@ -150,7 +155,7 @@ add_custom_command(TARGET glSceneEditor POST_BUILD
     "${SHADER_RESOURCE_OUTPUT_DIR}/stl.fs"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${ASSIMP_DIR}/bin/assimp-vc140-mt.dll"
-    "$<TARGET_FILE_DIR:glSceneEditor>/assimp-vc140-mt.dll"
+    "$<TARGET_FILE_DIR:openSLMSlicer>/assimp-vc140-mt.dll"
 )
 if (WIN32)
   get_target_property(_qt_core_release Qt${QT_VERSION_MAJOR}::Core IMPORTED_LOCATION_RELEASE)
@@ -166,8 +171,8 @@ if (WIN32)
     PATH_SUFFIXES bin
   )
   if (QT_WINDEPLOYQT_EXECUTABLE)
-    add_custom_command(TARGET glSceneEditor POST_BUILD
-      COMMAND "${QT_WINDEPLOYQT_EXECUTABLE}" --no-translations "$<TARGET_FILE:glSceneEditor>"
+    add_custom_command(TARGET openSLMSlicer POST_BUILD
+      COMMAND "${QT_WINDEPLOYQT_EXECUTABLE}" --no-translations "$<TARGET_FILE:openSLMSlicer>"
       COMMENT "Deploying Qt runtime files"
     )
   endif()
@@ -175,9 +180,9 @@ endif()
 
 # Copy the PySLM runtime last so its matching MSVC runtime wins over other
 # copies that may be placed next to the executable.
-add_custom_command(TARGET glSceneEditor POST_BUILD
+add_custom_command(TARGET openSLMSlicer POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${PYSLM_RUNTIME_DIR}" "$<TARGET_FILE_DIR:glSceneEditor>"
+    "${PYSLM_RUNTIME_DIR}" "$<TARGET_FILE_DIR:openSLMSlicer>"
   COMMENT "Copying PySLM runtime files"
 )
 
@@ -185,8 +190,8 @@ if (BUILD_TESTING)
   set(PROJECT_TEST_SOURCES ${PROJECT_SOURCES})
   list(REMOVE_ITEM PROJECT_TEST_SOURCES "main.cpp")
   add_executable(project_tests "tests/project_tests.cpp" ${PROJECT_TEST_SOURCES})
-  get_target_property(_app_include_dirs glSceneEditor INCLUDE_DIRECTORIES)
-  get_target_property(_app_link_libraries glSceneEditor LINK_LIBRARIES)
+  get_target_property(_app_include_dirs openSLMSlicer INCLUDE_DIRECTORIES)
+  get_target_property(_app_link_libraries openSLMSlicer LINK_LIBRARIES)
   target_include_directories(project_tests PRIVATE ${_app_include_dirs})
   target_link_libraries(project_tests PRIVATE ${_app_link_libraries})
   target_compile_definitions(project_tests PRIVATE _CRT_SECURE_NO_WARNINGS
@@ -196,7 +201,7 @@ if (BUILD_TESTING)
   endif()
   set_target_properties(project_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-  add_dependencies(project_tests glSceneEditor)
+  add_dependencies(project_tests openSLMSlicer)
   add_custom_command(TARGET project_tests POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
       "${PYSLM_RUNTIME_DIR}" "$<TARGET_FILE_DIR:project_tests>"
@@ -227,4 +232,17 @@ if (BUILD_TESTING)
     COMMENT "Copying PySLM runtime files for slicing tests"
   )
   add_test(NAME slicing_engine COMMAND slicing_tests)
+
+  add_executable(slice_export_tests "tests/slice_export_tests.cpp"
+    "slice_export.cpp" "slmslice_format.cpp" "cli_format.cpp")
+  target_include_directories(slice_export_tests PRIVATE "${APP_SOURCE_DIR}")
+  target_link_libraries(slice_export_tests PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+  target_compile_definitions(slice_export_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+  if (MSVC)
+    target_compile_options(slice_export_tests PRIVATE /utf-8)
+  endif()
+  set_target_properties(slice_export_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  add_test(NAME slice_export COMMAND slice_export_tests)
+  set_tests_properties(slice_export PROPERTIES TIMEOUT 45)
 endif()

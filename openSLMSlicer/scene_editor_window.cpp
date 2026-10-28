@@ -7,6 +7,8 @@
 #include <QColor>
 #include <QCloseEvent>
 #include <QCoreApplication>
+#include <QDateTime>
+#include <QDesktopServices>
 #include <QDir>
 #include <QDockWidget>
 #include <QDialog>
@@ -35,14 +37,18 @@
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSettings>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSplitter>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QStatusBar>
+#include <QStringList>
 #include <QStyle>
 #include <QToolBar>
 #include <QToolButton>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QWindow>
@@ -51,8 +57,10 @@
 #include <cmath>
 #include <limits>
 
-#include "scene_viewport.h"
+#include "export_slice_dialog.h"
 #include "model_names.h"
+#include "scene_viewport.h"
+#include "slice_file_info_dialog.h"
 
 namespace
 {
@@ -89,13 +97,123 @@ QString FormatFileSize(qint64 bytes)
     return QStringLiteral("%1 %2")
         .arg(locale.toString(size, 'f', 2), QString::fromLatin1(units[unit]));
 }
+
+// Guard a re-entrant export: reset on every exit path, including cancellations.
+class ScopedFlag
+{
+public:
+    explicit ScopedFlag(bool& flag) : flag_(flag) { flag_ = true; }
+    ~ScopedFlag() { flag_ = false; }
+    ScopedFlag(const ScopedFlag&) = delete;
+    ScopedFlag& operator=(const ScopedFlag&) = delete;
+private:
+    bool& flag_;
+};
+
+// Windows file names cannot contain these characters; replace them so the
+// generated export name always matches the project/part name as closely as
+// possible.
+QString SanitizeSliceExportName(const QString& name)
+{
+    QString cleaned;
+    cleaned.reserve(name.size());
+    for (const QChar character : name)
+    {
+        const ushort code = character.unicode();
+        const bool illegal = code < 0x20 || code == 0x7f ||
+            code == '<' || code == '>' || code == ':' || code == '"' ||
+            code == '/' || code == '\\' || code == '|' || code == '?' ||
+            code == '*';
+        cleaned.append(illegal ? QChar::fromLatin1('_') : character);
+    }
+    while (!cleaned.isEmpty() &&
+           (cleaned.back() == QChar::fromLatin1('.') ||
+            cleaned.back() == QChar::fromLatin1(' ')))
+    {
+        cleaned.chop(1);
+    }
+    const QString trimmed = cleaned.trimmed();
+    return trimmed.isEmpty() ? QStringLiteral("slices") : trimmed;
+}
+
+qint64 SliceExportThicknessMicrometers(const SliceBuildSnapshot& snapshot)
+{
+    const double thickness_mm = snapshot.settings.layer_thickness_mm;
+    if (!(thickness_mm > 0.0))
+        return 0;
+    return static_cast<qint64>(std::llround(thickness_mm * 1000.0));
+}
+
+QString SliceExportProjectName(const QString& project_path,
+                               const SliceBuildSnapshot& snapshot)
+{
+    QString name;
+    if (!project_path.trimmed().isEmpty())
+        name = QFileInfo(project_path).completeBaseName();
+    if (name.trimmed().isEmpty() && !snapshot.parts.empty())
+        name = snapshot.parts.front().name;
+    return SanitizeSliceExportName(name);
+}
+
+QString SliceExportLastDirectory()
+{
+    const QSettings settings(QStringLiteral("openSLMSlicer"),
+                             QStringLiteral("openSLMSlicer"));
+    const QString directory =
+        settings.value(QStringLiteral("export/last_directory")).toString();
+    if (directory.isEmpty() || !QDir(directory).exists())
+        return QString();
+    return QDir(directory).absolutePath();
+}
+
+SliceExportFormat SliceExportLastFormat()
+{
+    const QSettings settings(QStringLiteral("openSLMSlicer"),
+                             QStringLiteral("openSLMSlicer"));
+    const QString suffix =
+        settings.value(QStringLiteral("export/last_format")).toString();
+    if (suffix.compare(QStringLiteral("cli"), Qt::CaseInsensitive) == 0)
+        return SliceExportFormat::Cli;
+    return SliceExportFormat::SlmSlice;
+}
+
+QString SliceExportFallbackDirectory(const QString& project_path)
+{
+    if (!project_path.trimmed().isEmpty())
+    {
+        const QString project_directory = QFileInfo(project_path).absolutePath();
+        if (!project_directory.isEmpty() && QDir(project_directory).exists())
+            return project_directory;
+    }
+    const QString documents =
+        QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    if (!documents.isEmpty() && QDir(documents).exists())
+        return documents;
+    return QDir::homePath();
+}
+
+QString SliceExportDefaultPath(const QString& project_path,
+                               const SliceBuildSnapshot& snapshot,
+                               SliceExportFormat format)
+{
+    QString directory = SliceExportLastDirectory();
+    if (directory.isEmpty())
+        directory = SliceExportFallbackDirectory(project_path);
+    const QString file_name = QStringLiteral("%1_%2um_%3.%4")
+        .arg(SliceExportProjectName(project_path, snapshot))
+        .arg(static_cast<qlonglong>(SliceExportThicknessMicrometers(snapshot)))
+        .arg(QDateTime::currentDateTime().toString(
+                 QStringLiteral("yyyyMMdd-HHmmss")),
+             SliceExportSuffix(format));
+    return QDir(directory).filePath(file_name);
+}
 } // namespace
 
 SceneEditorWindow::SceneEditorWindow(SceneViewport& viewport, const QString& project_path,
                                      const QString& recent_projects_file)
     : viewport_(viewport), project_path_(project_path), recent_projects_file_(recent_projects_file)
 {
-    setWindowTitle(QStringLiteral("glSceneEditor"));
+    setWindowTitle(QStringLiteral("openSLMSlicer"));
     resize(SceneViewport::kInitialWidth, SceneViewport::kInitialHeight);
 
     QWindow* glfw_window = QWindow::fromWinId(
@@ -215,6 +333,31 @@ SceneEditorWindow::SceneEditorWindow(SceneViewport& viewport, const QString& pro
     clear_slice_action_->setEnabled(false);
     connect(clear_slice_action_, &QAction::triggered,
             this, &SceneEditorWindow::ClearSlicePreview);
+    export_slice_action_ = slice_menu->addAction(QStringLiteral("导出切片文件…"));
+    export_slice_action_->setObjectName(QStringLiteral("exportSliceAction"));
+    export_slice_action_->setIcon(QIcon(QStringLiteral(":/icons/save.svg")));
+    export_slice_action_->setIconText(QStringLiteral("导出切片"));
+    export_slice_action_->setToolTip(
+        QStringLiteral("把当前切片预览导出为 .slmslice 或 CLI 文件"));
+    export_slice_action_->setEnabled(false);
+    connect(export_slice_action_, &QAction::triggered,
+            this, &SceneEditorWindow::ExportSliceFile);
+    open_slice_file_action_ = slice_menu->addAction(QStringLiteral("打开切片文件…"));
+    open_slice_file_action_->setObjectName(QStringLiteral("openSliceFileAction"));
+    open_slice_file_action_->setIcon(QIcon(QStringLiteral(":/icons/folder-open.svg")));
+    open_slice_file_action_->setIconText(QStringLiteral("打开切片"));
+    open_slice_file_action_->setToolTip(
+        QStringLiteral("读取 .slmslice 文件并在切片预览中查看，不需要 STL 模型"));
+    connect(open_slice_file_action_, &QAction::triggered,
+            this, &SceneEditorWindow::OpenSliceFile);
+    slice_file_info_action_ = slice_menu->addAction(QStringLiteral("切片信息…"));
+    slice_file_info_action_->setObjectName(QStringLiteral("sliceFileInfoAction"));
+    slice_file_info_action_->setIcon(QIcon(QStringLiteral(":/icons/ruler.svg")));
+    slice_file_info_action_->setIconText(QStringLiteral("切片信息"));
+    slice_file_info_action_->setToolTip(
+        QStringLiteral("查看 .slmslice 文件的 header、part 列表、层数和校验和"));
+    connect(slice_file_info_action_, &QAction::triggered,
+            this, &SceneEditorWindow::ShowSliceFileInfo);
 
     QMenu* view_menu = menuBar()->addMenu(QStringLiteral("视图(&V)"));
 
@@ -304,7 +447,7 @@ void SceneEditorWindow::UpdateProjectState()
 {
     const QString name = project_path_.isEmpty() ? QStringLiteral("未命名工程")
                                                 : QFileInfo(project_path_).fileName();
-    const QString title = QStringLiteral("%1[*] - glSceneEditor").arg(name);
+    const QString title = QStringLiteral("%1[*] - openSLMSlicer").arg(name);
     if (windowTitle() != title)
         setWindowTitle(title);
     setWindowModified(viewport_.HistoryRevision() != saved_history_revision_);
@@ -327,14 +470,14 @@ bool SceneEditorWindow::SaveProject(bool save_as)
     if (save_as || target.isEmpty())
     {
         const QString initial_target = QDir(ProjectFile::DefaultOpenDirectory()).filePath(
-            target.isEmpty() ? QStringLiteral("未命名工程.glproj") : QFileInfo(target).fileName());
+            target.isEmpty() ? QStringLiteral("未命名工程.slmproj") : QFileInfo(target).fileName());
         target = QFileDialog::getSaveFileName(this, QStringLiteral("保存工程"),
             initial_target, ProjectFile::Filter());
         if (target.isEmpty())
             return false;
-        if (!target.endsWith(QStringLiteral(".glproj"), Qt::CaseInsensitive))
+        if (!target.endsWith(QStringLiteral(".slmproj"), Qt::CaseInsensitive))
         {
-            target += QStringLiteral(".glproj");
+            target += QStringLiteral(".slmproj");
             // The native dialog checks its entered path, not the appended one.
             if (QFileInfo::exists(target) && QMessageBox::question(this,
                 QStringLiteral("覆盖工程"), QStringLiteral("%1 已存在，是否覆盖？")
@@ -633,9 +776,11 @@ void SceneEditorWindow::RememberCurrentProject()
 
 void SceneEditorWindow::closeEvent(QCloseEvent* event)
 {
+    closing_ = true;
     RenderPause pause(render_timer_, viewport_);
     if (!ConfirmSaveChanges())
     {
+        closing_ = false;
         event->ignore();
         return;
     }
@@ -790,6 +935,7 @@ void SceneEditorWindow::EditModelTransform(TransformMode mode)
     transform_dialog_->show();
     UpdateModelTransformDialog(true);
     UpdateModelSelection(true);
+    UpdateSlicePanel(true);
     transform_dialog_->raise();
     transform_dialog_->activateWindow();
 }
@@ -1188,6 +1334,12 @@ void SceneEditorWindow::CreateSliceDock()
     slice_reslice_button_->setObjectName(QStringLiteral("sliceResliceButton"));
     slice_reslice_button_->setEnabled(false);
     button_row->addWidget(slice_reslice_button_);
+    slice_export_button_ = new QPushButton(QStringLiteral("导出切片…"), contents);
+    slice_export_button_->setObjectName(QStringLiteral("sliceExportButton"));
+    slice_export_button_->setEnabled(false);
+    slice_export_button_->setToolTip(
+        QStringLiteral("把当前切片预览导出为 .slmslice 或 CLI 文件"));
+    button_row->addWidget(slice_export_button_);
     slice_clear_button_ = new QPushButton(QStringLiteral("清除"), contents);
     slice_clear_button_->setObjectName(QStringLiteral("sliceClearButton"));
     slice_clear_button_->setEnabled(false);
@@ -1195,8 +1347,9 @@ void SceneEditorWindow::CreateSliceDock()
     layout->addLayout(button_row);
 
     QLabel* note = new QLabel(
-        QStringLiteral("仅预览当前层轮廓、填充、方向和跳转，不写入工程，也不导出文件。"),
+        QStringLiteral("可导出或打开 .slmslice / CLI；预览不写入工程，导出不进入撤销记录。"),
         contents);
+    note->setObjectName(QStringLiteral("slicePreviewNote"));
     note->setWordWrap(true);
     note->setTextFormat(Qt::PlainText);
     layout->addWidget(note);
@@ -1254,6 +1407,8 @@ void SceneEditorWindow::CreateSliceDock()
             this, &SceneEditorWindow::GenerateSlice);
     connect(slice_clear_button_, &QPushButton::clicked,
             this, &SceneEditorWindow::ClearSlicePreview);
+    connect(slice_export_button_, &QPushButton::clicked,
+            this, &SceneEditorWindow::ExportSliceFile);
     UpdateSlicePanel(true);
 }
 
@@ -1267,10 +1422,20 @@ void SceneEditorWindow::UpdateSlicePanel(bool force)
     slice_action_->setEnabled(can_slice);
 
     if (viewport_.ConsumeSliceInvalidation())
+    {
+        loaded_slice_path_.clear();
         statusBar()->showMessage(QStringLiteral("模型已变更，切片预览已清除。"));
+    }
 
     const auto info = viewport_.SliceInfo();
     clear_slice_action_->setEnabled(info.has_preview);
+    // Exporting only reads the preview snapshot: disable it when the preview
+    // is missing and while a transform dialog owns the selection.
+    const bool can_export = info.has_preview && !viewport_.IsTransformEditing();
+    if (export_slice_action_)
+        export_slice_action_->setEnabled(can_export);
+    if (slice_export_button_)
+        slice_export_button_->setEnabled(can_export);
     if (slice_hide_models_check_)
         slice_hide_models_check_->setEnabled(
             info.has_preview && !viewport_.IsTransformEditing());
@@ -1332,9 +1497,13 @@ void SceneEditorWindow::UpdateSlicePanel(bool force)
     slice_had_preview_ = true;
 
     slice_layer_label_->setText(
-        QStringLiteral("第 %1 / %2 个有效层")
-            .arg(static_cast<qulonglong>(info.layer_index))
-            .arg(static_cast<qulonglong>(info.layer_count)));
+        info.loaded_from_file
+            ? QStringLiteral("第 %1 / %2 层（来自切片文件）")
+                  .arg(static_cast<qulonglong>(info.layer_index))
+                  .arg(static_cast<qulonglong>(info.layer_count))
+            : QStringLiteral("第 %1 / %2 个有效层")
+                  .arg(static_cast<qulonglong>(info.layer_index))
+                  .arg(static_cast<qulonglong>(info.layer_count)));
     slice_z_label_->setText(
         QStringLiteral("Z = %1 mm").arg(QLocale().toString(info.z_mm, 'f', 3)));
     slice_contour_label_->setText(
@@ -1625,6 +1794,7 @@ void SceneEditorWindow::GenerateSlice()
     }
 
     last_slice_revision_ = 0;
+    loaded_slice_path_.clear();
     UpdateSlicePanel(true);
     slice_dock_->show();
     slice_dock_->raise();
@@ -1640,6 +1810,216 @@ void SceneEditorWindow::GenerateSlice()
             issues.join(QStringLiteral("\n")));
 }
 
+void SceneEditorWindow::ExportSliceFile()
+{
+    if (exporting_ || closing_)
+        return;
+    if (!viewport_.SliceInfo().has_preview)
+    {
+        QMessageBox::information(this, QStringLiteral("导出切片文件"),
+            QStringLiteral("没有可导出的切片预览，请先执行“切片 → 生成切片…”。"));
+        return;
+    }
+    if (viewport_.IsTransformEditing())
+    {
+        QMessageBox::information(this, QStringLiteral("导出切片文件"),
+            QStringLiteral("请先关闭模型变换参数窗口。"));
+        return;
+    }
+
+    RenderPause pause(render_timer_, viewport_);
+
+    // Exporting only reads the current preview; it never re-slices, dirties the
+    // project, or writes the operation history.
+    const SliceBuildSnapshot snapshot = viewport_.BuildSliceExportSnapshot();
+    if (snapshot.layers.empty())
+    {
+        QMessageBox::warning(this, QStringLiteral("无法导出切片文件"),
+            QStringLiteral("当前切片预览没有可导出的层，请重新生成切片。"));
+        return;
+    }
+
+    const SliceExportFormat last_format = SliceExportLastFormat();
+    ExportSliceDialog dialog(
+        snapshot, SliceExportDefaultPath(project_path_, snapshot, last_format),
+        last_format, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    const SliceExportOptions options = dialog.Options();
+    if (options.output_path.isEmpty())
+        return;
+
+    // Overwrite confirmation happens after the dialog is accepted and before
+    // anything is written.
+    if (QFileInfo::exists(options.output_path))
+    {
+        const auto answer = QMessageBox::question(this,
+            QStringLiteral("覆盖切片文件"),
+            QStringLiteral("%1 已存在，是否覆盖？")
+                .arg(QDir::toNativeSeparators(options.output_path)),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes)
+            return;
+    }
+
+    ScopedFlag exporting(exporting_);
+    QProgressDialog progress(QStringLiteral("正在导出切片文件，请稍候…"),
+                             QStringLiteral("取消"), 0, 100, this);
+    progress.setObjectName(QStringLiteral("sliceExportProgressDialog"));
+    progress.setWindowTitle(QStringLiteral("导出切片文件"));
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
+    progress.setValue(0);
+    progress.show();
+    QCoreApplication::processEvents();
+
+    auto progress_callback = [&progress](std::size_t completed,
+                                         std::size_t total) -> bool
+    {
+        if (progress.wasCanceled())
+            return false;
+        if (total > 0)
+        {
+            const int maximum = static_cast<int>(
+                std::min<std::size_t>(
+                    total, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+            if (progress.maximum() != maximum)
+                progress.setMaximum(maximum);
+            progress.setValue(static_cast<int>(
+                std::min<std::size_t>(completed,
+                    static_cast<std::size_t>(maximum))));
+        }
+        QCoreApplication::processEvents();
+        return !progress.wasCanceled();
+    };
+
+    const SliceExportResult result =
+        ExportSliceBuild(snapshot, options, progress_callback);
+    progress.close();
+
+    if (result.cancelled)
+    {
+        statusBar()->showMessage(QStringLiteral("已取消导出切片文件。"));
+        return;
+    }
+    if (!result.ok)
+    {
+        QStringList details;
+        details.append(result.error.isEmpty()
+            ? QStringLiteral("未能写入切片文件。") : result.error);
+        for (const QString& issue : result.issues)
+            details.append(issue);
+        QMessageBox::warning(this, QStringLiteral("无法导出切片文件"),
+            details.join(QStringLiteral("\n")));
+        return;
+    }
+
+    const QString output_path = QFileInfo(options.output_path).absoluteFilePath();
+    const QString output_directory = QFileInfo(output_path).absolutePath();
+    QSettings settings(QStringLiteral("openSLMSlicer"),
+                       QStringLiteral("openSLMSlicer"));
+    settings.setValue(QStringLiteral("export/last_directory"), output_directory);
+    settings.setValue(QStringLiteral("export/last_format"),
+                      SliceExportSuffix(options.format));
+
+    statusBar()->showMessage(
+        QStringLiteral("已导出切片文件：%1 | %2 层 | 轮廓 %3 条 | 填充 %4 条 | %5")
+            .arg(QDir::toNativeSeparators(output_path))
+            .arg(static_cast<qulonglong>(result.layers_written))
+            .arg(static_cast<qulonglong>(result.contours_written))
+            .arg(static_cast<qulonglong>(result.hatches_written))
+            .arg(FormatFileSize(static_cast<qint64>(result.bytes_written))));
+    if (dialog.OpenFolderAfterExport())
+    {
+        QDesktopServices::openUrl(
+            QUrl::fromLocalFile(output_directory));
+    }
+}
+
+void SceneEditorWindow::OpenSliceFile()
+{
+    if (exporting_ || closing_)
+        return;
+
+    RenderPause pause(render_timer_, viewport_);
+    QString directory = SliceExportLastDirectory();
+    if (directory.isEmpty())
+    {
+        directory = !project_path_.isEmpty()
+            ? QFileInfo(project_path_).absolutePath()
+            : QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    }
+    if (!loaded_slice_path_.isEmpty())
+        directory = QFileInfo(loaded_slice_path_).absolutePath();
+
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("打开切片文件"), directory,
+        QStringLiteral("openSLMSlicer 切片 (*.slmslice)"));
+    if (path.isEmpty())
+        return;
+
+    SliceBuildSnapshot snapshot;
+    QString error;
+    if (!ReadSlmSliceFile(path, snapshot, error))
+    {
+        QMessageBox::warning(this, QStringLiteral("无法打开切片文件"), error);
+        return;
+    }
+    if (!viewport_.LoadSlicePreview(snapshot, error))
+    {
+        QMessageBox::warning(this, QStringLiteral("无法打开切片文件"), error);
+        return;
+    }
+
+    loaded_slice_path_ = QFileInfo(path).absoluteFilePath();
+    slice_had_preview_ = true;
+    last_slice_revision_ = 0;
+    UpdateSlicePanel(true);
+    slice_dock_->show();
+    slice_dock_->raise();
+    const auto info = viewport_.SliceInfo();
+    statusBar()->showMessage(
+        QStringLiteral("已打开切片文件：%1 | %2 层 | 轮廓 %3 条 | 填充 %4 条")
+            .arg(QDir::toNativeSeparators(loaded_slice_path_))
+            .arg(static_cast<qulonglong>(info.layer_count))
+            .arg(static_cast<qulonglong>(info.contour_count))
+            .arg(static_cast<qulonglong>(info.hatch_count)));
+}
+
+void SceneEditorWindow::ShowSliceFileInfo()
+{
+    RenderPause pause(render_timer_, viewport_);
+    QString directory = SliceExportLastDirectory();
+    if (!loaded_slice_path_.isEmpty())
+        directory = QFileInfo(loaded_slice_path_).absolutePath();
+    if (directory.isEmpty())
+    {
+        directory = !project_path_.isEmpty()
+            ? QFileInfo(project_path_).absolutePath()
+            : QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    }
+
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("切片文件信息"), directory,
+        QStringLiteral("openSLMSlicer 切片 (*.slmslice)"));
+    if (path.isEmpty())
+        return;
+
+    SliceFileInfo info;
+    QString error;
+    if (!ReadSlmSliceFileInfo(path, info, error))
+    {
+        QMessageBox::warning(this, QStringLiteral("无法读取切片文件信息"), error);
+        return;
+    }
+
+    SliceFileInfoDialog dialog(QFileInfo(path).absoluteFilePath(), info, this);
+    dialog.exec();
+}
+
 void SceneEditorWindow::ClearSlicePreview()
 {
     if (!viewport_.SliceInfo().has_preview)
@@ -1648,6 +2028,7 @@ void SceneEditorWindow::ClearSlicePreview()
     viewport_.ClearSlicePreview();
     slice_had_preview_ = false;
     last_slice_revision_ = 0;
+    loaded_slice_path_.clear();
     if (slice_dock_->isVisible())
         slice_dock_->hide();
     UpdateSlicePanel(true);
@@ -1982,7 +2363,7 @@ void SceneEditorWindow::OpenStl()
     render_timer_.stop();
     viewport_.ReleaseCursor();
     const QString initial_directory =
-        QStringLiteral("D:/vs_cmake_proj/glSceneEditor/asset");
+        QStringLiteral("D:/vs_cmake_proj/openSLMSlicer/asset");
     const QStringList paths = QFileDialog::getOpenFileNames(
         this, QStringLiteral("打开 STL 模型（可多选）"), initial_directory,
         QStringLiteral("STL 模型 (*.stl)"));

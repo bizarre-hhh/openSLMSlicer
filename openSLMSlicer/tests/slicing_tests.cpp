@@ -183,6 +183,16 @@ int main()
                     std::cerr << "hatch model id was not copied\n";
                     return 20;
                 }
+            const SlicePath& contour = layer.contours.front();
+            if (contour.model_id != 7 ||
+                contour.role != SliceRingRole::Outer ||
+                !contour.closed ||
+                contour.points.size() < 2 ||
+                contour.points.front() != contour.points.back())
+            {
+                std::cerr << "contour model id/role/closure was not exported\n";
+                return 21;
+            }
             if (std::abs(layer.contour_path_length_mm - 40.0) > 0.05 ||
                 layer.hatch_path_length_mm <= 0.0)
             {

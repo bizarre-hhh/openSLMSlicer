@@ -28,7 +28,7 @@ namespace RecentProjects
 {
 QString RecordFilePath()
 {
-    return QStringLiteral("D:/vs_cmake_proj/glSceneEditor/asset/recent_projects.json");
+    return QStringLiteral("D:/vs_cmake_proj/openSLMSlicer/asset/recent_projects.json");
 }
 
 QStringList Read(const QString& record_file)
@@ -49,7 +49,7 @@ QStringList Read(const QString& record_file)
     {
         const QString path = value.toString();
         if (path.isEmpty() || !QDir::isAbsolutePath(QDir::fromNativeSeparators(path)) ||
-            !path.endsWith(QStringLiteral(".glproj"), Qt::CaseInsensitive))
+            !path.endsWith(QStringLiteral(".slmproj"), Qt::CaseInsensitive))
             continue;
         const QString normalized = NormalizePath(path);
         if (!paths.contains(normalized, kPathCase))

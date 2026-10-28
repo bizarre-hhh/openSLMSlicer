@@ -1,6 +1,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialog>
 #include <QDoubleSpinBox>
 #include <QDataStream>
@@ -13,6 +14,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QSet>
+#include <QSettings>
 #include <QKeyEvent>
 #include <QImage>
 #include <QDockWidget>
@@ -22,9 +24,11 @@
 #include <QToolBar>
 #include <QToolButton>
 #include <QMessageBox>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSlider>
 #include <QSpinBox>
+#include <QStatusBar>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QWidget>
@@ -45,6 +49,8 @@
 #include "recent_projects.h"
 #include "scene_editor_window.h"
 #include "scene_viewport.h"
+#include "slice_export.h"
+#include "slice_file_info_dialog.h"
 #include "welcome_dialog.h"
 
 namespace
@@ -229,7 +235,7 @@ void Trigger(SceneEditorWindow& window, const char* name)
 void FileTests(const QString& directory)
 {
     QString error;
-    const QString file = directory + QStringLiteral("/往返测试.glproj");
+    const QString file = directory + QStringLiteral("/往返测试.slmproj");
     ProjectData original;
     const QByteArray stl = ReadBytes(QStringLiteral(TEST_ASSET_DIR "/cube_30mm.stl"));
     ProjectModel first;
@@ -267,7 +273,7 @@ void FileTests(const QString& directory)
         ProjectData sized = original;
         sized.plate_size_mm = {225, 175, 100};
         sized.models[1].placement_center_mm = {112.5f, 87.5f};
-        const QString path = directory + "/version3.glproj";
+        const QString path = directory + "/version3.slmproj";
         WriteBytes(path, LegacyProject(sized, 3));
         ProjectData restored;
         Require(ProjectFile::Read(path, restored, error), qPrintable(error));
@@ -275,7 +281,7 @@ void FileTests(const QString& directory)
     });
     Run("version 2 compatibility defaults platform to 100 mm and preserves model positions", [&]()
     {
-        const QString path = directory + "/version2.glproj";
+        const QString path = directory + "/version2.slmproj";
         WriteBytes(path, LegacyProject(original, 2));
         ProjectData restored;
         Require(ProjectFile::Read(path, restored, error), qPrintable(error));
@@ -286,7 +292,7 @@ void FileTests(const QString& directory)
         ProjectData sized = original;
         sized.plate_size_mm = {250.75f, 160.5f, 42.25f};
         sized.models[1].placement_center_mm = {125.375f, 80.25f};
-        const QString path = directory + "/sized.glproj";
+        const QString path = directory + "/sized.slmproj";
         Require(ProjectFile::Write(path, sized, error), qPrintable(error));
         ProjectData restored;
         Require(ProjectFile::Read(path, restored, error), qPrintable(error));
@@ -294,7 +300,7 @@ void FileTests(const QString& directory)
     });
     Run("legacy version 1 preserves geometry and ignores presentation", [&]()
     {
-        const QString legacy = directory + "/legacy.glproj";
+        const QString legacy = directory + "/legacy.slmproj";
         WriteBytes(legacy, LegacyProject(original));
         ProjectData restored;
         Require(ProjectFile::Read(legacy, restored, error), qPrintable(error));
@@ -303,7 +309,7 @@ void FileTests(const QString& directory)
     Run("empty project roundtrip", [&]()
     {
         ProjectData empty, restored;
-        const QString path = directory + QStringLiteral("/empty.glproj");
+        const QString path = directory + QStringLiteral("/empty.slmproj");
         Require(ProjectFile::Write(path, empty, error), qPrintable(error));
         Require(ProjectFile::Read(path, restored, error), qPrintable(error));
         Require(SameProject(empty, restored), "empty document differs");
@@ -313,23 +319,23 @@ void FileTests(const QString& directory)
         const QByteArray bytes = ReadBytes(file);
         for (int size : {0, 4, 8, 30, bytes.size() - 1})
         {
-            WriteBytes(directory + "/bad.glproj", bytes.left(size));
+            WriteBytes(directory + "/bad.slmproj", bytes.left(size));
             ProjectData previous = original;
-            Require(!ProjectFile::Read(directory + "/bad.glproj", previous, error), "truncation accepted");
+            Require(!ProjectFile::Read(directory + "/bad.slmproj", previous, error), "truncation accepted");
             Require(SameProject(previous, original), "failed read replaced document");
         }
         QByteArray invalid = bytes;
         invalid[4] = 6; // Unsupported format version.
-        WriteBytes(directory + "/bad.glproj", invalid);
+        WriteBytes(directory + "/bad.slmproj", invalid);
         ProjectData previous = original;
-        Require(!ProjectFile::Read(directory + "/bad.glproj", previous, error), "newer version accepted");
+        Require(!ProjectFile::Read(directory + "/bad.slmproj", previous, error), "newer version accepted");
         invalid = bytes;
         for (int i = 24; i < 28; ++i) // First path's byte length after dimensions and model count.
             invalid[i] = static_cast<char>(0xff);
-        WriteBytes(directory + "/bad.glproj", invalid);
-        Require(!ProjectFile::Read(directory + "/bad.glproj", previous, error), "oversized length accepted");
-        WriteBytes(directory + "/bad.glproj", bytes + "extra");
-        Require(!ProjectFile::Read(directory + "/bad.glproj", previous, error), "trailing corruption accepted");
+        WriteBytes(directory + "/bad.slmproj", invalid);
+        Require(!ProjectFile::Read(directory + "/bad.slmproj", previous, error), "oversized length accepted");
+        WriteBytes(directory + "/bad.slmproj", bytes + "extra");
+        Require(!ProjectFile::Read(directory + "/bad.slmproj", previous, error), "trailing corruption accepted");
     });
     Run("invalid numeric data and write failures preserve existing project", [&]()
     {
@@ -351,7 +357,7 @@ void FileTests(const QString& directory)
         invalid = original;
         invalid.models[0].scale.y = 0;
         Require(!ProjectFile::Write(file, invalid, error), "singular transform accepted");
-        Require(!ProjectFile::Write(directory + "/missing/path.glproj", original, error), "invalid destination accepted");
+        Require(!ProjectFile::Write(directory + "/missing/path.slmproj", original, error), "invalid destination accepted");
         Require(ReadBytes(file) == before, "original file lost");
     });
 }
@@ -456,7 +462,7 @@ void SceneTests(const QString& directory)
     });
     Run("save, delete original STL, reopen and preserve exact world positions", [&]()
     {
-        const QString path = directory + QStringLiteral("/独立工程.glproj");
+        const QString path = directory + QStringLiteral("/独立工程.slmproj");
         Require(ProjectFile::Write(path, viewport.SnapshotProject(), error), qPrintable(error));
         Require(QFile::remove(source), "remove source STL");
         viewport.NewProject();
@@ -509,7 +515,7 @@ void SceneTests(const QString& directory)
     });
     Run("legacy project opens with visible models, no boxes and Home camera", [&]()
     {
-        const QString path = directory + "/legacy-scene.glproj";
+        const QString path = directory + "/legacy-scene.slmproj";
         WriteBytes(path, LegacyProject(saved));
         ProjectData legacy;
         Require(ProjectFile::Read(path, legacy, error), qPrintable(error));
@@ -642,7 +648,7 @@ void TransformTests(const QString& directory)
         }
         const auto saved = viewport.SnapshotProject();
         const auto expected = *viewport.ModelInfo(id);
-        const QString path = directory + "/gizmo-transforms.glproj";
+        const QString path = directory + "/gizmo-transforms.slmproj";
         Require(ProjectFile::Write(path, saved, error), qPrintable(error));
         ProjectData loaded;
         Require(ProjectFile::Read(path, loaded, error), qPrintable(error));
@@ -909,7 +915,7 @@ void PlatePlacementTests(const QString& directory)
         const auto settled_history = viewport.HistoryRevision();
         Require(viewport.PlaceSelectedModelsOnPlate(error) && viewport.HistoryRevision() == settled_history,
                 "already grounded models added history");
-        const QString project_path = directory + QStringLiteral("/贴合基板.glproj");
+        const QString project_path = directory + QStringLiteral("/贴合基板.slmproj");
         ProjectData project;
         Require(ProjectFile::Write(project_path, expected, error) && ProjectFile::Read(project_path, project, error) &&
                 viewport.ApplyProject(project, error) && SameProject(expected, viewport.SnapshotProject()), "grounded project roundtrip");
@@ -1052,7 +1058,7 @@ void DuplicationTests(const QString& directory)
         Require(viewport.ArraySelectedModels(3, 1, {0, 0}, error), qPrintable(error));
         const auto expected = viewport.SnapshotProject();
         Require(viewport.Undo(error) && viewport.Redo(error), "array redo depends on source file");
-        const QString project_path = directory + QStringLiteral("/阵列工程.glproj");
+        const QString project_path = directory + QStringLiteral("/阵列工程.slmproj");
         ProjectData project;
         Require(ProjectFile::Write(project_path, expected, error) && ProjectFile::Read(project_path, project, error) &&
                 viewport.ApplyProject(project, error) && SameProject(expected, viewport.SnapshotProject()),
@@ -1160,7 +1166,7 @@ void NamingTests(const QString& directory)
         Require(viewport.Redo(error) && SameProject(expected, viewport.SnapshotProject()), "rename redo not exact");
         viewport.RemoveStl(id);
         Require(viewport.Undo(error) && viewport.ModelInfo(id)->name == QStringLiteral("打印件 A"), "deleted name not restored");
-        const QString file = directory + "/names.glproj";
+        const QString file = directory + "/names.slmproj";
         ProjectData read;
         Require(ProjectFile::Write(file, expected, error) && ProjectFile::Read(file, read, error) &&
                 SameProject(read, expected) && viewport.ApplyProject(read, error) &&
@@ -1202,7 +1208,7 @@ void NamingTests(const QString& directory)
                 "long name duplication failed");
         unique_names();
         const auto expected = viewport.SnapshotProject();
-        const QString file = directory + "/unicode-names.glproj";
+        const QString file = directory + "/unicode-names.slmproj";
         ProjectData read;
         Require(ProjectFile::Write(file, expected, error) && ProjectFile::Read(file, read, error) &&
                 SameProject(read, expected), "Unicode copy names changed in persistence");
@@ -1231,7 +1237,7 @@ void NamingTests(const QString& directory)
         Require(viewport.Undo(error) && SameProject(before_array, viewport.SnapshotProject()) &&
                 viewport.Redo(error) && SameProject(array, viewport.SnapshotProject()), "array name undo/redo");
         ProjectData read;
-        const QString file = directory + "/named-array.glproj";
+        const QString file = directory + "/named-array.slmproj";
         Require(ProjectFile::Write(file, array, error) && ProjectFile::Read(file, read, error) &&
                 viewport.ApplyProject(read, error) && SameProject(array, viewport.SnapshotProject()), "array names not persisted");
         load(source);
@@ -1463,7 +1469,7 @@ void PlateTests(const QString& directory)
     });
     Run("reopen sized project restores exact world geometry; New returns to default platform", [&]()
     {
-        const QString path = directory + "/platform_scene.glproj";
+        const QString path = directory + "/platform_scene.slmproj";
         Require(ProjectFile::Write(path, saved, error), qPrintable(error));
         viewport.NewProject();
         Require(viewport.PlateSizeMm() == glm::vec3(100) && !viewport.CanUndo(),
@@ -1517,12 +1523,12 @@ void RecentProjectTests(const QString& directory)
     QString error;
     Run("recent projects persist Unicode paths, keep five, deduplicate and move reopened project first", [&]()
     {
-        Require(RecentProjects::RecordFilePath() == QStringLiteral("D:/vs_cmake_proj/glSceneEditor/asset/recent_projects.json"),
+        Require(RecentProjects::RecordFilePath() == QStringLiteral("D:/vs_cmake_proj/openSLMSlicer/asset/recent_projects.json"),
                 "recent record outside configured asset directory");
         Require(RecentProjects::Read(record).isEmpty(), "missing recent record not empty");
         for (int i = 0; i < 7; ++i)
         {
-            const QString path = directory + QStringLiteral("/最近工程 %1.glproj").arg(i);
+            const QString path = directory + QStringLiteral("/最近工程 %1.slmproj").arg(i);
             Require(ProjectFile::Write(path, ProjectData{}, error), qPrintable(error));
             projects.append(path);
             Require(RecentProjects::Remember(path, error, record), qPrintable(error));
@@ -1568,8 +1574,8 @@ void UiTests(const QString& directory)
     QString error;
     std::string load_error;
     glm::vec3 size;
-    const QString first = directory + QStringLiteral("/首次保存.glproj");
-    const QString second = directory + QStringLiteral("/另存为.glproj");
+    const QString first = directory + QStringLiteral("/首次保存.slmproj");
+    const QString second = directory + QStringLiteral("/另存为.slmproj");
     const QString model = QStringLiteral(TEST_ASSET_DIR "/cube_30mm.stl");
     Run("project menu actions and shortcuts", [&]()
     {
@@ -1578,6 +1584,16 @@ void UiTests(const QString& directory)
         Require(window.findChild<QAction*>("saveProjectAction")->shortcut() == QKeySequence::Save, "Save shortcut");
         Require(window.findChild<QAction*>("saveProjectAsAction")->shortcut() == QKeySequence::SaveAs, "Save As shortcut");
         Require(window.findChild<QAction*>("openStlAction")->shortcut() == QKeySequence("Ctrl+I"), "Import shortcut");
+        auto* export_action = window.findChild<QAction*>("exportSliceAction");
+        auto* export_button = window.findChild<QPushButton*>("sliceExportButton");
+        Require(export_action && export_button &&
+                !export_action->isEnabled() && !export_button->isEnabled(),
+                "export controls should exist and be disabled without a slice preview");
+        auto* open_slice_action = window.findChild<QAction*>("openSliceFileAction");
+        auto* slice_info_action = window.findChild<QAction*>("sliceFileInfoAction");
+        Require(open_slice_action && open_slice_action->isEnabled() &&
+                slice_info_action && slice_info_action->isEnabled(),
+                "open/info slice file actions should exist and stay enabled");
     });
     Run("platform toolbar dialog reads current dimensions and Cancel changes nothing", [&]()
     {
@@ -1765,7 +1781,7 @@ void UiTests(const QString& directory)
         QStringList fixtures;
         for (int i = 0; i < 7; ++i)
         {
-            const QString path = directory + QStringLiteral("/欢迎工程 %1.glproj").arg(i);
+            const QString path = directory + QStringLiteral("/欢迎工程 %1.slmproj").arg(i);
             Require(ProjectFile::Write(path, ProjectData{}, error), qPrintable(error));
             Require(RecentProjects::Remember(path, error, record), qPrintable(error));
             fixtures.prepend(path);
@@ -1799,8 +1815,8 @@ void UiTests(const QString& directory)
     Run("missing and corrupt recent projects stay on welcome and preserve recent order", [&]()
     {
         const QString record = directory + QStringLiteral("/bad_recent.json");
-        const QString missing = directory + QStringLiteral("/已移动的工程.glproj");
-        const QString corrupt = directory + QStringLiteral("/损坏工程.glproj");
+        const QString missing = directory + QStringLiteral("/已移动的工程.slmproj");
+        const QString corrupt = directory + QStringLiteral("/损坏工程.slmproj");
         Require(RecentProjects::Remember(missing, error, record), qPrintable(error));
         WriteBytes(corrupt, "not a project file");
         Require(RecentProjects::Remember(corrupt, error, record), qPrintable(error));
@@ -1825,7 +1841,7 @@ void UiTests(const QString& directory)
         Require(welcome.result() != QDialog::Accepted && welcome.ProjectPath().isEmpty(),
                 "cancel welcome Open entered editor");
     });
-    Run("welcome and editor Open start in configured glproj directory", [&]()
+    Run("welcome and editor Open start in configured slmproj directory", [&]()
     {
         const QByteArray before_recent = ReadBytes(recent_file);
         bool correct = false;
@@ -1837,12 +1853,12 @@ void UiTests(const QString& directory)
             dialog->reject();
         };
         WithDialog(reject, [&]() { Trigger(window, "openProjectAction"); });
-        Require(correct, "editor Open starts outside glproj directory");
+        Require(correct, "editor Open starts outside slmproj directory");
         correct = false;
         WelcomeDialog welcome(recent_file);
         WithDialog(reject, [&]()
         { welcome.findChild<QPushButton*>("openProjectButton")->click(); });
-        Require(correct, "welcome Open starts outside glproj directory");
+        Require(correct, "welcome Open starts outside slmproj directory");
         Require(ReadBytes(recent_file) == before_recent, "cancel Open changed recent record");
     });
     Run("cancel Save As keeps current path and unsaved changes", [&]()
@@ -1923,7 +1939,7 @@ void UiTests(const QString& directory)
         const auto id = viewport.ModelInfos()[0].id;
         auto* model_list = window.findChild<QListWidget*>("stlModelList");
         model_list->itemWidget(model_list->item(0))->findChild<QToolButton*>("selectModelButton")->click();
-        const QString transform_project = directory + QStringLiteral("/参数编辑.glproj");
+        const QString transform_project = directory + QStringLiteral("/参数编辑.slmproj");
         WithFile(transform_project, [&]() { Trigger(window, "saveProjectAction"); });
         auto* move = window.findChild<QPushButton*>("modelTranslateButton");
         auto* rotate = window.findChild<QPushButton*>("modelRotateButton");
@@ -2080,7 +2096,7 @@ void UiTests(const QString& directory)
         Require(viewport.ModelCount() == 1 && window.findChild<QListWidget*>("stlModelList")->count() == 1, "UI array undo list");
         Trigger(window, "redoAction");
         Require(SameProject(expected, viewport.SnapshotProject()), "UI array redo");
-        const QString array_project = directory + QStringLiteral("/界面阵列.glproj");
+        const QString array_project = directory + QStringLiteral("/界面阵列.slmproj");
         WithFile(array_project, [&]() { Trigger(window, "saveProjectAsAction"); });
         ProjectData saved;
         Require(!window.isWindowModified() && ProjectFile::Read(array_project, saved, error) &&
@@ -2103,7 +2119,7 @@ void UiTests(const QString& directory)
         auto* list = window.findChild<QListWidget*>("stlModelList");
         list->itemWidget(list->item(0))->findChild<QToolButton*>("selectModelButton")->click();
         Require(action->isEnabled(), "selection did not enable placement");
-        const QString path = directory + QStringLiteral("/界面贴合基板.glproj");
+        const QString path = directory + QStringLiteral("/界面贴合基板.slmproj");
         WithFile(path, [&]() { Trigger(window, "saveProjectAsAction"); });
         const auto before = viewport.SnapshotProject();
         const auto position = viewport.ModelInfo(id)->world_position_mm;
@@ -2139,7 +2155,7 @@ void UiTests(const QString& directory)
         auto label = [&](int index) { return row(index)->findChild<QLabel*>("modelRowName"); };
         Require(list->item(0)->text() == QStringLiteral("cube_30mm") &&
                 label(1)->text() == QStringLiteral("cube_30mm (2)"), "UI import names not numbered/stripped");
-        const QString path = directory + "/ui-names.glproj";
+        const QString path = directory + "/ui-names.slmproj";
         WithFile(path, [&]() { Trigger(window, "saveProjectAsAction"); });
         auto double_click = [&](QWidget* target)
         {
@@ -2302,6 +2318,84 @@ void UiTests(const QString& directory)
                 "hide models checkbox default state");
         Require(clear && clear->isEnabled(), "clear slice action is disabled");
 
+        // Export the current preview through the real menu action and read the
+        // written .slmslice back. Explorer must stay closed during tests.
+        auto* export_action = window.findChild<QAction*>("exportSliceAction");
+        Require(export_action && export_action->isEnabled(),
+                "export action should be enabled with a preview");
+        const QString export_path =
+            directory + QStringLiteral("/ui-export.") + QStringLiteral("slmslice");
+        WithDialog([&](QDialog* dialog)
+        {
+            Require(dialog->objectName() == QStringLiteral("exportSliceDialog"),
+                    "wrong export dialog");
+            auto* format = dialog->findChild<QComboBox*>(
+                QStringLiteral("exportFormatCombo"));
+            auto* path_edit = dialog->findChild<QLineEdit*>(
+                QStringLiteral("exportPathEdit"));
+            auto* open_folder = dialog->findChild<QCheckBox*>(
+                QStringLiteral("exportOpenFolderCheck"));
+            Require(format && path_edit && open_folder,
+                    "export dialog fields missing");
+            format->setCurrentIndex(0);
+            path_edit->setText(QDir::toNativeSeparators(export_path));
+            open_folder->setChecked(false);
+            dialog->accept();
+        }, [&]() { Trigger(window, "exportSliceAction"); });
+        Require(QFileInfo::exists(export_path),
+                "export action did not write a .slmslice file");
+        SliceBuildSnapshot exported;
+        Require(ReadSlmSliceFile(export_path, exported, error), qPrintable(error));
+        Require(!exported.layers.empty(), "exported .slmslice has no layers");
+        Require(exported.settings.layer_thickness_mm == 1.0,
+                "exported .slmslice lost slice settings");
+        Require(viewport.HistoryRevision() == history &&
+                window.isWindowModified() == was_modified,
+                "export changed project state");
+        {
+            QSettings settings(QStringLiteral("openSLMSlicer"),
+                               QStringLiteral("openSLMSlicer"));
+            Require(settings.value(QStringLiteral("export/last_format")).toString() ==
+                        QStringLiteral("slmslice"),
+                    "export did not remember its format");
+            // Do not leave test paths in the developer's real settings.
+            settings.remove(QStringLiteral("export/last_directory"));
+            settings.remove(QStringLiteral("export/last_format"));
+        }
+
+        SliceFileInfo file_info;
+        Require(ReadSlmSliceFileInfo(export_path, file_info, error),
+                qPrintable(error));
+        SliceFileInfoDialog info_dialog(export_path, file_info);
+        auto* info_summary = info_dialog.findChild<QPlainTextEdit*>(
+            QStringLiteral("sliceInfoSummary"));
+        auto* info_header = info_dialog.findChild<QPlainTextEdit*>(
+            QStringLiteral("sliceInfoHeader"));
+        auto* info_checksums = info_dialog.findChild<QPlainTextEdit*>(
+            QStringLiteral("sliceInfoChecksums"));
+        Require(info_summary && info_summary->toPlainText().contains(
+                    QStringLiteral("层数：30")),
+                "slice info summary");
+        Require(info_header && info_header->toPlainText().contains(
+                    QStringLiteral("slmslice")),
+                "slice info header JSON");
+        Require(info_checksums &&
+                info_checksums->toPlainText().split(QLatin1Char('\n')).size() >= 30 &&
+                info_checksums->toPlainText().size() > 64,
+                "slice info checksums");
+
+        // Re-open the exported .slmslice through the menu action; no STL model
+        // is needed to display the stored layers.
+        WithFile(export_path, [&]() { Trigger(window, "openSliceFileAction"); });
+        const auto opened_info = viewport.SliceInfo();
+        Require(opened_info.has_preview && opened_info.loaded_from_file,
+                "open slice file did not load a file preview");
+        Require(opened_info.layer_count == 30,
+                "opened .slmslice layer count");
+        Require(viewport.HistoryRevision() == history &&
+                window.isWindowModified() == was_modified,
+                "opening .slmslice changed project state");
+
         hatch_check->click();
         Require(!viewport.SliceInfo().hatches_visible,
                 "hatch visibility toggle did not hide fills");
@@ -2361,7 +2455,14 @@ void UiTests(const QString& directory)
         viewport.EndModelMove();
         Require(viewport.RenderFrame(), "render after slice invalidation");
         Require(!viewport.SliceInfo().has_preview, "slice preview was not invalidated");
-        Require(viewport.ConsumeSliceInvalidation(), "slice invalidation was not reported");
+        // The window's render timer may consume the one-shot invalidation flag
+        // while RenderFrame() pumps native events; the status bar message is the
+        // user-visible part of the same notification.
+        const bool invalidated = viewport.ConsumeSliceInvalidation();
+        Require(invalidated ||
+                window.statusBar()->currentMessage().contains(
+                    QStringLiteral("模型已变更")),
+                "slice invalidation was not reported");
 
         Require(viewport.SetPlateSizeMm({40, 40, 100}, error), qPrintable(error));
         SliceSettings normal;
@@ -2393,7 +2494,7 @@ int main(int argc, char* argv[])
             for (const QString& name : {QStringLiteral("产品展示"), QStringLiteral("装配测试"),
                                        QStringLiteral("底座模型"), QStringLiteral("模型排布"), QStringLiteral("机械支架")})
             {
-                const QString path = directory.path() + QStringLiteral("/") + name + QStringLiteral(".glproj");
+                const QString path = directory.path() + QStringLiteral("/") + name + QStringLiteral(".slmproj");
                 Require(ProjectFile::Write(path, ProjectData{}, error), qPrintable(error));
                 Require(RecentProjects::Remember(path, error, record), qPrintable(error));
             }

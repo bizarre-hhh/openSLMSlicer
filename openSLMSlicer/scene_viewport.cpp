@@ -12,6 +12,7 @@
 #include <limits>
 #include <QFile>
 #include <QFileInfo>
+#include <QCoreApplication>
 #define NOMINMAX
 #include <windows.h>
 #include <imm.h>
@@ -221,7 +222,7 @@ bool SceneViewport::Initialize()
     window_ = glfwCreateWindow(
         static_cast<int>(kInitialWidth * content_scale),
         static_cast<int>(kInitialHeight * content_scale),
-        "glSceneEditor - Scene", nullptr, nullptr);
+        "openSLMSlicer - Scene", nullptr, nullptr);
     if (window_ == nullptr)
         return false;
 
@@ -2078,6 +2079,7 @@ bool SceneViewport::GenerateSlice(const SliceSettings& settings,
     }
 
     slice_layers_ = std::move(result.layers);
+    loaded_slice_snapshot_.reset();
     slice_total_contour_path_length_mm_ = result.total_contour_path_length_mm;
     slice_total_hatch_path_length_mm_ = result.total_hatch_path_length_mm;
     slice_total_path_length_mm_ = result.total_path_length_mm;
@@ -2098,6 +2100,7 @@ bool SceneViewport::GenerateSlice(const SliceSettings& settings,
 
 void SceneViewport::ClearSlicePreview()
 {
+    loaded_slice_snapshot_.reset();
     if (slice_layers_.empty() && !slice_visible_)
         return;
     if (window_ != nullptr && glad_ready_)
@@ -2191,6 +2194,7 @@ SceneViewport::SlicePreviewInfo SceneViewport::SliceInfo() const
 {
     SlicePreviewInfo info;
     info.has_preview = !slice_layers_.empty();
+    info.loaded_from_file = loaded_slice_snapshot_.has_value();
     info.visible = slice_visible_ && info.has_preview;
     info.contours_visible = slice_contours_visible_ && info.has_preview;
     info.hatches_visible = slice_hatches_visible_ && info.has_preview;
@@ -2216,6 +2220,80 @@ SceneViewport::SlicePreviewInfo SceneViewport::SliceInfo() const
         info.layer_path_length_mm = layer.path_length_mm;
     }
     return info;
+}
+
+SliceBuildSnapshot SceneViewport::BuildSliceExportSnapshot() const
+{
+    if (loaded_slice_snapshot_)
+        return *loaded_slice_snapshot_;
+
+    std::vector<SlicePartInfo> parts;
+    parts.reserve(models_.size());
+    for (const auto& entry : models_)
+    {
+        SlicePartInfo part;
+        part.id = entry.info.id;
+        part.name = entry.info.name;
+        part.source_path = QString::fromStdString(entry.info.path);
+        part.triangle_count = entry.info.triangle_count;
+        parts.push_back(std::move(part));
+    }
+
+    return BuildSliceBuildSnapshot(
+        slice_layers_,
+        slice_applied_settings_,
+        std::move(parts),
+        {static_cast<double>(plate_size_mm_.x),
+         static_cast<double>(plate_size_mm_.y),
+         static_cast<double>(plate_size_mm_.z)},
+        slice_source_project_revision_,
+        QCoreApplication::applicationVersion());
+}
+
+bool SceneViewport::LoadSlicePreview(const SliceBuildSnapshot& snapshot,
+                                     QString& error)
+{
+    error.clear();
+    std::vector<SliceLayer> layers;
+    layers.reserve(snapshot.layers.size());
+    for (const SliceLayer& layer : snapshot.layers)
+    {
+        if (layer.empty)
+            continue;
+        SliceLayer copy = layer;
+        copy.index = layers.size() + 1;
+        layers.push_back(std::move(copy));
+    }
+    if (layers.empty())
+    {
+        error = QStringLiteral("切片文件不包含可显示的轮廓或填充。");
+        return false;
+    }
+
+    slice_layers_ = std::move(layers);
+    slice_applied_settings_ = snapshot.settings;
+    slice_total_contour_path_length_mm_ = 0.0;
+    slice_total_hatch_path_length_mm_ = 0.0;
+    slice_total_path_length_mm_ = 0.0;
+    for (const SliceLayer& layer : slice_layers_)
+    {
+        slice_total_contour_path_length_mm_ += layer.contour_path_length_mm;
+        slice_total_hatch_path_length_mm_ += layer.hatch_path_length_mm;
+        slice_total_path_length_mm_ += layer.path_length_mm;
+    }
+    slice_current_layer_ = 0;
+    slice_visible_ = true;
+    slice_contours_visible_ = true;
+    slice_hatches_visible_ = true;
+    slice_direction_visible_ = false;
+    slice_jumps_visible_ = false;
+    models_hidden_ = false;
+    slice_source_project_revision_ = project_revision_;
+    slice_invalidated_ = false;
+    loaded_slice_snapshot_ = snapshot;
+    UploadSliceLayer();
+    ++slice_revision_;
+    return true;
 }
 
 bool SceneViewport::ConsumeSliceInvalidation()

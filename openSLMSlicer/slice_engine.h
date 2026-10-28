@@ -22,9 +22,19 @@ struct SliceModelInput
     std::vector<SliceTriangle> triangles;
 };
 
+enum class SliceRingRole
+{
+    Outer,
+    Inner
+};
+
 struct SlicePath
 {
     std::vector<std::array<double, 2>> points;
+    // Export metadata. Coordinates stay in build-plate millimeters.
+    std::uint64_t model_id = 0;
+    SliceRingRole role = SliceRingRole::Outer;
+    bool closed = true;
 };
 
 struct SliceHatchLine
@@ -48,6 +58,7 @@ struct SliceLayer
     std::size_t index = 0;      // 1-based index among non-empty layers
     std::int64_t grid_index = 0; // layer plane index on the global Z grid
     double z_mm = 0.0;
+    bool empty = false;         // export snapshots keep empty Z layers
     std::vector<SlicePath> contours;
     std::vector<SliceHatchLine> hatches;
     double contour_path_length_mm = 0.0;

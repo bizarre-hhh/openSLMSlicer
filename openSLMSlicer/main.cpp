@@ -8,7 +8,8 @@
 int main(int argc, char* argv[])
 {
     QApplication app(argc, argv);
-    app.setApplicationName(QStringLiteral("glSceneEditor"));
+    app.setApplicationName(QStringLiteral("openSLMSlicer"));
+    app.setApplicationVersion(QStringLiteral("0.1.0"));
     WelcomeDialog welcome;
     while (welcome.exec() == QDialog::Accepted)
     {

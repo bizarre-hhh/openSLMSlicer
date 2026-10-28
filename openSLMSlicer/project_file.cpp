@@ -10,7 +10,8 @@
 
 namespace
 {
-constexpr quint32 kMagic = 0x474C5052; // GLPR
+constexpr quint32 kMagic = 0x534C4D50; // SLMP
+constexpr quint32 kLegacyMagic = 0x474C5052; // GLPR from the pre-rename format
 constexpr quint32 kVersion = 5;
 constexpr quint32 kMaxModels = 10000;
 constexpr quint32 kMaxPathBytes = 1024 * 1024;
@@ -67,12 +68,12 @@ bool FiniteVector(const glm::vec3& value)
 
 QString ProjectFile::Filter()
 {
-    return QStringLiteral("glSceneEditor 工程 (*.glproj)");
+    return QStringLiteral("openSLMSlicer 工程 (*.slmproj)");
 }
 
 QString ProjectFile::DefaultOpenDirectory()
 {
-    return QStringLiteral("D:/vs_cmake_proj/glSceneEditor/glproj");
+    return QStringLiteral("D:/vs_cmake_proj/openSLMSlicer/slmproj");
 }
 
 bool ProjectFile::Validate(const ProjectData& project, QString& error)
@@ -123,9 +124,9 @@ bool ProjectFile::Read(const QString& path, ProjectData& project, QString& error
     Configure(stream);
     quint32 magic = 0, version = 0, count = 0;
     stream >> magic >> version;
-    if (stream.status() != QDataStream::Ok || magic != kMagic)
+    if (stream.status() != QDataStream::Ok || (magic != kMagic && magic != kLegacyMagic))
     {
-        error = QStringLiteral("这不是有效的 glSceneEditor 工程文件。");
+        error = QStringLiteral("这不是有效的 openSLMSlicer 工程文件。");
         return false;
     }
     if (version < 1 || version > kVersion)

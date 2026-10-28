@@ -106,7 +106,8 @@ SlicePath ConvertPath(const pyslm::Path& source)
     return path;
 }
 
-void AppendPolygons(const pyslm::Polygons& polygons, std::vector<SlicePath>& paths)
+void AppendPolygons(const pyslm::Polygons& polygons, std::uint64_t model_id,
+                    std::vector<SlicePath>& paths)
 {
     for (const pyslm::Polygon& polygon : polygons)
     {
@@ -114,13 +115,21 @@ void AppendPolygons(const pyslm::Polygons& polygons, std::vector<SlicePath>& pat
         {
             SlicePath path = ConvertPath(polygon.exterior);
             if (path.points.size() >= 2)
+            {
+                path.model_id = model_id;
+                path.role = SliceRingRole::Outer;
                 paths.push_back(std::move(path));
+            }
         }
         for (const pyslm::Path& interior : polygon.interiors)
         {
             SlicePath path = ConvertPath(interior);
             if (path.points.size() >= 2)
+            {
+                path.model_id = model_id;
+                path.role = SliceRingRole::Inner;
                 paths.push_back(std::move(path));
+            }
         }
     }
 }
@@ -356,7 +365,7 @@ SliceResult SliceBuild(const std::vector<SliceModelInput>& models,
             {
                 const pyslm::Polygons polygons =
                     model.part->getVectorSlicePolygons(z_mm, slice_options);
-                AppendPolygons(polygons, paths);
+                AppendPolygons(polygons, model.geometry.input->id, paths);
 
                 if (settings.hatch.enabled && model.hatcher && !polygons.empty())
                 {

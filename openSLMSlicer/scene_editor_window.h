@@ -60,6 +60,9 @@ private:
     void PlaceModelsOnPlate();
     void EditPlateSize();
     void GenerateSlice();
+    void ExportSliceFile();
+    void OpenSliceFile();
+    void ShowSliceFileInfo();
     void ClearSlicePreview();
     void CreateSliceDock();
     void UpdateSlicePanel(bool force = false);
@@ -84,6 +87,9 @@ private:
     QAction* place_on_plate_action_ = nullptr;
     QAction* slice_action_ = nullptr;
     QAction* clear_slice_action_ = nullptr;
+    QAction* export_slice_action_ = nullptr;
+    QAction* open_slice_file_action_ = nullptr;
+    QAction* slice_file_info_action_ = nullptr;
     QDialog* transform_dialog_ = nullptr;
     std::array<QDoubleSpinBox*, 3> transform_fields_{};
     std::uint64_t transform_dialog_model_id_ = 0;
@@ -128,6 +134,7 @@ private:
     QCheckBox* slice_jump_visible_check_ = nullptr;
     QCheckBox* slice_hide_models_check_ = nullptr;
     QPushButton* slice_reslice_button_ = nullptr;
+    QPushButton* slice_export_button_ = nullptr;
     QPushButton* slice_clear_button_ = nullptr;
     double slice_layer_thickness_mm_ = 0.03;
     bool slice_hatch_enabled_ = true;
@@ -136,11 +143,14 @@ private:
     double slice_hatch_layer_increment_deg_ = 67.0;
     std::uint64_t last_slice_revision_ = 0;
     bool slice_had_preview_ = false;
+    QString loaded_slice_path_;
     std::unordered_map<std::uint64_t, QListWidgetItem*> model_items_;
     std::uint64_t last_model_state_revision_ = 0;
     std::uint64_t last_details_model_id_ = 0;
     std::uint64_t last_transform_revision_ = 0;
     bool ready_ = false;
+    bool closing_ = false;
+    bool exporting_ = false;
 };
 
 #endif

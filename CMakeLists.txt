@@ -9,9 +9,9 @@ if (POLICY CMP0141)
   set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:MSVC>>,$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
 endif()
 
-project ("glSceneEditor")
+project ("openSLMSlicer")
 
 include(CTest)
 
 # 包含子项目。
-add_subdirectory ("glSceneEditor")
+add_subdirectory ("openSLMSlicer")
