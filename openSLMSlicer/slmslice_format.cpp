@@ -184,12 +184,7 @@ bool ReadLayerBlob(const QByteArray& blob, SliceLayer& layer,
             error = QStringLiteral("轮廓坐标数据不完整。");
             return false;
         }
-        for (std::size_t i = 1; i < path.points.size(); ++i)
-        {
-            const double dx = path.points[i][0] - path.points[i - 1][0];
-            const double dy = path.points[i][1] - path.points[i - 1][1];
-            layer.contour_path_length_mm += std::hypot(dx, dy);
-        }
+        layer.contour_path_length_mm += SlicePathLengthMm(path);
         layer.contours.push_back(std::move(path));
     }
 

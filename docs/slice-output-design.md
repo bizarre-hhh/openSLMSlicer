@@ -2,7 +2,7 @@
 
 > 目标项目：openSLMSlicer（C++20 / Qt5 / OpenGL，Windows x64，基于 pyslm_cpp 的金属 SLM 切片预览）
 > 文档状态：设计提案 v0.1 ｜ 2026-10-26
-> 实现状态（2026-10-27）：**M1 已落地**——P0 数据模型、`.slmslice` v1 writer/reader、CLI 2.0 ASCII writer、导出 UI、打开 `.slmslice` 预览/信息对话框和 `slice_export_tests` 均已实现，Debug/Release 全量 CTest 通过。CLI 的 `$$LAYER/z` 按规范写**层顶面**（切片内部仍保存层中面），详见 `README.md` 与 `docs/slmslice-v1.md`。
+> 实现状态（2026-10-29）：**M1 全清单已落地**——P0 数据模型、`.slmslice` v1 writer/reader、CLI 2.0 ASCII、SVG/PNG 联系人表、CSV 逐层统计、`IJobWriter` + `SliceExportRegistry`、导出 UI、导出后回读校验（层数/轮廓数/填充数/长度）、打开 `.slmslice` 预览/信息对话框和扩展后的 `slice_export_tests` 均已实现；Debug 与 Release 全量 CTest 4/4 通过（Release UI 用例首次运行时出现过一次 45 s 超时，重跑通过），另用独立的 Python/Pillow 解析器对五种导出做了一次第三方回读验收。CLI 的 `$$LAYER/z` 按规范写**层顶面**（切片内部仍保存层中面），详见 `README.md`、`docs/slmslice-v1.md` 与 `docs/slice-report-formats.md`。
 > 结论先行：**不要自造"对外交换格式"**；自建一个**内部切片容器 `.slmslice`** 用于无损保存/回归测试；对外依次实现 **CLI → OVF → 3MF Toolpath Extension**；设备适配靠 **machine profile + build processor + 后处理插件**，而不是靠文件后缀。
 
 ---

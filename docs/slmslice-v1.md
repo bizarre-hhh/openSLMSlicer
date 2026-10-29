@@ -16,11 +16,11 @@
 
 M1 的实际范围：
 
-- **入口**：在切片预览有效时使用“切片 → 导出切片文件…”（或预览面板的“导出切片…”），格式可选 `.slmslice` 或 CLI；见 README 的“切片预览”章节。
-- **writer + reader**：导出时写文件，随后可回读并校验层数、轮廓数、填充数和逐层 SHA-256；测试也直接使用 reader。
+- **入口**：在切片预览有效时使用“切片 → 导出切片文件…”（或预览面板的“导出切片…”），格式可选 `.slmslice`、CLI、SVG、PNG 或 CSV；后三种报告格式见 `docs/slice-report-formats.md`。
+- **writer + reader**：导出时写文件，随后可回读并校验层数、轮廓数、填充数和路径长度；`.slmslice` 另校验逐层 SHA-256；测试也直接使用 reader。
 - **打开与查看**：可用“切片 → 打开切片文件…”把 `.slmslice` 载入切片预览（不需要 STL 模型）；空层保留在文件中，但预览滑块只显示有几何的层。“切片 → 切片信息…”显示 header JSON、part 列表、层数/空层/轮廓/填充统计和每层 SHA-256。
-- **可另存为 CLI**：打开 `.slmslice` 后仍可通过导出功能选择 CLI，把当前快照写成 `.cli`；没有独立的批量转换命令。
-- **对外格式是 CLI 与后续的 OVF/3MF**：M1 实现 CLI 2.0 ASCII（仅逐层几何，见第 8 节）；OVF、3MF Toolpath 属于后续阶段，当前未实现，不能声称可上机或已被设备验证。
+- **可另存为其他格式**：打开 `.slmslice` 后仍可通过导出功能选择 CLI/SVG/PNG/CSV，把当前快照写成对应格式；没有独立的批量转换命令。
+- **对外格式是 CLI 与后续的 OVF/3MF**：M1 实现 CLI 2.0 ASCII（仅逐层几何，见第 8 节）；SVG/PNG/CSV 是报告/统计产物；OVF、3MF Toolpath 属于后续阶段，当前未实现，不能声称可上机或已被设备验证。
 
 ## 2. 文件布局
 
@@ -357,4 +357,5 @@ M1 的限制（不要对外承诺超出这些范围的能力）：
 - 信息读取：`ReadSlmSliceFileInfo()`（`openSLMSlicer/slice_export.cpp` / `slmslice_format.cpp`）
 - CLI 写入/解析：`openSLMSlicer/cli_format.cpp`、`openSLMSlicer/cli_format.h`
 - 回归测试：`openSLMSlicer/tests/slice_export_tests.cpp`（roundtrip、空层、Unicode 名称、校验和损坏、取消保留旧文件）
+- SVG/PNG/CSV 报告格式：`docs/slice-report-formats.md`
 - CLI 2.0 规范原文：<https://www.hmilch.net/downloads/cli_format.html>

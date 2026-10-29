@@ -2363,6 +2363,64 @@ void UiTests(const QString& directory)
             settings.remove(QStringLiteral("export/last_format"));
         }
 
+        // Report formats: select each one through the real export dialog and
+        // verify the written file with the same read-back summarizer used by
+        // the post-write validation.
+        {
+            struct ReportCase
+            {
+                SliceExportFormat format;
+                const char* suffix;
+            };
+            const ReportCase report_cases[] = {
+                {SliceExportFormat::Svg, "svg"},
+                {SliceExportFormat::Png, "png"},
+                {SliceExportFormat::Csv, "csv"}
+            };
+            for (const ReportCase& report : report_cases)
+            {
+                const QString report_path =
+                    directory + QStringLiteral("/ui-report.") +
+                    QString::fromLatin1(report.suffix);
+                WithDialog([&](QDialog* dialog)
+                {
+                    auto* format = dialog->findChild<QComboBox*>(
+                        QStringLiteral("exportFormatCombo"));
+                    auto* path_edit = dialog->findChild<QLineEdit*>(
+                        QStringLiteral("exportPathEdit"));
+                    auto* open_folder = dialog->findChild<QCheckBox*>(
+                        QStringLiteral("exportOpenFolderCheck"));
+                    Require(format && path_edit && open_folder,
+                            "report export dialog fields missing");
+                    int index = -1;
+                    for (int i = 0; i < format->count(); ++i)
+                    {
+                        if (format->itemData(i).toInt() ==
+                            static_cast<int>(report.format))
+                        {
+                            index = i;
+                            break;
+                        }
+                    }
+                    Require(index >= 0, "report format missing from dialog");
+                    format->setCurrentIndex(index);
+                    path_edit->setText(QDir::toNativeSeparators(report_path));
+                    open_folder->setChecked(false);
+                    dialog->accept();
+                }, [&]() { Trigger(window, "exportSliceAction"); });
+                Require(QFileInfo::exists(report_path),
+                        "report export did not write a file");
+                SliceFileSummary report_summary;
+                QString report_error;
+                Require(SummarizeSliceFile(report_path, report.format,
+                                           report_summary, report_error),
+                        qPrintable(report_error));
+                Require(report_summary.layers > 0 &&
+                            report_summary.contours > 0,
+                        "report export summary is empty");
+            }
+        }
+
         SliceFileInfo file_info;
         Require(ReadSlmSliceFileInfo(export_path, file_info, error),
                 qPrintable(error));

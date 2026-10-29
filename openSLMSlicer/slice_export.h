@@ -6,9 +6,11 @@
 #include <QString>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 // Export-facing snapshot of one generated slice build. The scene viewport owns
@@ -37,14 +39,18 @@ struct SliceBuildSnapshot
 enum class SliceExportFormat
 {
     SlmSlice,
-    Cli
+    Cli,
+    Svg,
+    Png,
+    Csv
 };
 
 struct SliceExportOptions
 {
     SliceExportFormat format = SliceExportFormat::Cli;
     QString output_path;
-    // .slmslice keeps empty grid layers by default; CLI always skips them.
+    // .slmslice and CSV can keep the empty grid layers between the first and
+    // last non-empty layer; CLI, SVG and PNG always skip empty layers.
     bool include_empty_layers = true;
     bool include_hatches = true;
     bool validate_after_write = true;
@@ -98,6 +104,89 @@ struct SliceFileInfo
 
 using SliceExportProgress =
     std::function<bool(std::size_t completed, std::size_t total)>;
+
+// Length helpers shared by the writers and the read-back validation. They are
+// computed from the stored geometry, not from the cached per-layer totals, so
+// hand-built snapshots and loaded files use the same numbers.
+inline double SlicePathLengthMm(const SlicePath& path)
+{
+    double length = 0.0;
+    for (std::size_t i = 1; i < path.points.size(); ++i)
+    {
+        const double dx = path.points[i][0] - path.points[i - 1][0];
+        const double dy = path.points[i][1] - path.points[i - 1][1];
+        length += std::hypot(dx, dy);
+    }
+    if (path.closed && path.points.size() > 2)
+    {
+        const auto& first = path.points.front();
+        const auto& last = path.points.back();
+        if (first[0] != last[0] || first[1] != last[1])
+            length += std::hypot(first[0] - last[0], first[1] - last[1]);
+    }
+    return length;
+}
+
+inline double SliceHatchLengthMm(const SliceHatchLine& line)
+{
+    return std::hypot(line.end[0] - line.start[0],
+                      line.end[1] - line.start[1]);
+}
+
+inline double SliceLayerContourLengthMm(const SliceLayer& layer)
+{
+    double length = 0.0;
+    for (const SlicePath& path : layer.contours)
+        length += SlicePathLengthMm(path);
+    return length;
+}
+
+inline double SliceLayerHatchLengthMm(const SliceLayer& layer)
+{
+    double length = 0.0;
+    for (const SliceHatchLine& line : layer.hatches)
+        length += SliceHatchLengthMm(line);
+    return length;
+}
+
+// One export format. Writers only serialize a snapshot; they never read UI
+// state and never re-slice.
+class IJobWriter
+{
+public:
+    virtual ~IJobWriter() = default;
+
+    virtual SliceExportFormat format() const = 0;
+    virtual QString name() const = 0;       // "openSLMSlicer 切片 (.slmslice)"
+    virtual QString fileFilter() const = 0; // "openSLMSlicer 切片 (*.slmslice)"
+    virtual QString suffix() const = 0;     // "slmslice"
+
+    virtual bool write(const SliceBuildSnapshot& snapshot,
+                       const SliceExportOptions& options,
+                       const SliceExportProgress& progress,
+                       SliceExportResult& result) const = 0;
+
+    // Validates the container and returns the geometry statistics stored in it.
+    virtual bool summarize(const QString& path, SliceFileSummary& summary,
+                           QString& error) const = 0;
+};
+
+// Process-wide registry of export formats. Writers are registered once and are
+// safe to use from the UI thread only.
+class SliceExportRegistry
+{
+public:
+    static const SliceExportRegistry& Instance();
+
+    const IJobWriter* WriterFor(SliceExportFormat format) const;
+    const std::vector<const IJobWriter*>& Writers() const { return writers_; }
+
+private:
+    SliceExportRegistry();
+
+    std::vector<std::unique_ptr<IJobWriter>> owned_;
+    std::vector<const IJobWriter*> writers_;
+};
 
 QString SliceExportFormatName(SliceExportFormat format);
 QString SliceExportFileFilter(SliceExportFormat format);

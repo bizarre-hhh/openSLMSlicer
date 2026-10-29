@@ -1,20 +1,30 @@
 #include "slice_export.h"
 
 #include "cli_format.h"
+#include "slice_report_export.h"
 #include "slmslice_format.h"
 
 #include <QFileInfo>
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <utility>
 
 namespace
 {
+bool IncludesEmptyLayers(SliceExportFormat format,
+                         const SliceExportOptions& options)
+{
+    return options.include_empty_layers &&
+           (format == SliceExportFormat::SlmSlice ||
+            format == SliceExportFormat::Csv);
+}
+
 std::size_t ExpectedWrittenLayers(const SliceBuildSnapshot& snapshot,
                                   const SliceExportOptions& options)
 {
-    if (options.format == SliceExportFormat::SlmSlice && options.include_empty_layers)
+    if (IncludesEmptyLayers(options.format, options))
         return snapshot.layers.size();
     std::size_t count = 0;
     for (const SliceLayer& layer : snapshot.layers)
@@ -40,6 +50,25 @@ std::size_t ExpectedHatches(const SliceBuildSnapshot& snapshot,
     for (const SliceLayer& layer : snapshot.layers)
         count += layer.hatches.size();
     return count;
+}
+
+double ExpectedContourLengthMm(const SliceBuildSnapshot& snapshot)
+{
+    double length = 0.0;
+    for (const SliceLayer& layer : snapshot.layers)
+        length += SliceLayerContourLengthMm(layer);
+    return length;
+}
+
+double ExpectedHatchLengthMm(const SliceBuildSnapshot& snapshot,
+                             const SliceExportOptions& options)
+{
+    if (!options.include_hatches)
+        return 0.0;
+    double length = 0.0;
+    for (const SliceLayer& layer : snapshot.layers)
+        length += SliceLayerHatchLengthMm(layer);
+    return length;
 }
 
 bool ValidateWrittenFile(const QString& path,
@@ -83,44 +112,236 @@ bool ValidateWrittenFile(const QString& path,
                 .arg(static_cast<qulonglong>(expected_hatches)));
         ok = false;
     }
+
+    // CLI rounds coordinates to 4 decimals, so its parsed path lengths are not
+    // compared; every other format reports lengths computed from the snapshot.
+    if (ok && options.format != SliceExportFormat::Cli)
+    {
+        constexpr double kLengthToleranceMm = 0.05;
+        const double expected_contour_length = ExpectedContourLengthMm(snapshot);
+        const double expected_hatch_length =
+            ExpectedHatchLengthMm(snapshot, options);
+        if (std::abs(summary.contour_length_mm - expected_contour_length) >
+            kLengthToleranceMm)
+        {
+            result.issues.push_back(
+                QStringLiteral("轮廓长度不一致：文件 %1 mm，预期 %2 mm")
+                    .arg(QString::number(summary.contour_length_mm, 'f', 3),
+                         QString::number(expected_contour_length, 'f', 3)));
+            ok = false;
+        }
+        if (std::abs(summary.hatch_length_mm - expected_hatch_length) >
+            kLengthToleranceMm)
+        {
+            result.issues.push_back(
+                QStringLiteral("填充长度不一致：文件 %1 mm，预期 %2 mm")
+                    .arg(QString::number(summary.hatch_length_mm, 'f', 3),
+                         QString::number(expected_hatch_length, 'f', 3)));
+            ok = false;
+        }
+    }
     return ok;
 }
+
+class SlmSliceWriter final : public IJobWriter
+{
+public:
+    SliceExportFormat format() const override
+    {
+        return SliceExportFormat::SlmSlice;
+    }
+    QString name() const override
+    {
+        return QStringLiteral("openSLMSlicer 切片 (.slmslice)");
+    }
+    QString fileFilter() const override
+    {
+        return QStringLiteral("openSLMSlicer 切片 (*.slmslice)");
+    }
+    QString suffix() const override { return QStringLiteral("slmslice"); }
+
+    bool write(const SliceBuildSnapshot& snapshot,
+               const SliceExportOptions& options,
+               const SliceExportProgress& progress,
+               SliceExportResult& result) const override
+    {
+        return WriteSlmSliceV1(snapshot, options, progress, result);
+    }
+    bool summarize(const QString& path, SliceFileSummary& summary,
+                   QString& error) const override
+    {
+        SliceBuildSnapshot ignored;
+        return ReadSlmSliceV1(path, ignored, summary, error);
+    }
+};
+
+class CliWriter final : public IJobWriter
+{
+public:
+    SliceExportFormat format() const override
+    {
+        return SliceExportFormat::Cli;
+    }
+    QString name() const override
+    {
+        return QStringLiteral("CLI 2.0 ASCII (.cli)");
+    }
+    QString fileFilter() const override
+    {
+        return QStringLiteral("Common Layer Interface (*.cli)");
+    }
+    QString suffix() const override { return QStringLiteral("cli"); }
+
+    bool write(const SliceBuildSnapshot& snapshot,
+               const SliceExportOptions& options,
+               const SliceExportProgress& progress,
+               SliceExportResult& result) const override
+    {
+        return WriteCliAscii(snapshot, options, progress, result);
+    }
+    bool summarize(const QString& path, SliceFileSummary& summary,
+                   QString& error) const override
+    {
+        return ParseCliAscii(path, summary, error);
+    }
+};
+
+class SvgWriter final : public IJobWriter
+{
+public:
+    SliceExportFormat format() const override
+    {
+        return SliceExportFormat::Svg;
+    }
+    QString name() const override
+    {
+        return QStringLiteral("SVG 联系人表 (.svg)");
+    }
+    QString fileFilter() const override
+    {
+        return QStringLiteral("SVG 联系人表 (*.svg)");
+    }
+    QString suffix() const override { return QStringLiteral("svg"); }
+
+    bool write(const SliceBuildSnapshot& snapshot,
+               const SliceExportOptions& options,
+               const SliceExportProgress& progress,
+               SliceExportResult& result) const override
+    {
+        return WriteSvgReport(snapshot, options, progress, result);
+    }
+    bool summarize(const QString& path, SliceFileSummary& summary,
+                   QString& error) const override
+    {
+        return SummarizeSvgReport(path, summary, error);
+    }
+};
+
+class PngWriter final : public IJobWriter
+{
+public:
+    SliceExportFormat format() const override
+    {
+        return SliceExportFormat::Png;
+    }
+    QString name() const override
+    {
+        return QStringLiteral("PNG 联系人表 (.png)");
+    }
+    QString fileFilter() const override
+    {
+        return QStringLiteral("PNG 联系人表 (*.png)");
+    }
+    QString suffix() const override { return QStringLiteral("png"); }
+
+    bool write(const SliceBuildSnapshot& snapshot,
+               const SliceExportOptions& options,
+               const SliceExportProgress& progress,
+               SliceExportResult& result) const override
+    {
+        return WritePngReport(snapshot, options, progress, result);
+    }
+    bool summarize(const QString& path, SliceFileSummary& summary,
+                   QString& error) const override
+    {
+        return SummarizePngReport(path, summary, error);
+    }
+};
+
+class CsvWriter final : public IJobWriter
+{
+public:
+    SliceExportFormat format() const override
+    {
+        return SliceExportFormat::Csv;
+    }
+    QString name() const override
+    {
+        return QStringLiteral("CSV 逐层统计 (.csv)");
+    }
+    QString fileFilter() const override
+    {
+        return QStringLiteral("CSV 逐层统计 (*.csv)");
+    }
+    QString suffix() const override { return QStringLiteral("csv"); }
+
+    bool write(const SliceBuildSnapshot& snapshot,
+               const SliceExportOptions& options,
+               const SliceExportProgress& progress,
+               SliceExportResult& result) const override
+    {
+        return WriteCsvReport(snapshot, options, progress, result);
+    }
+    bool summarize(const QString& path, SliceFileSummary& summary,
+                   QString& error) const override
+    {
+        return SummarizeCsvReport(path, summary, error);
+    }
+};
 } // namespace
+
+SliceExportRegistry::SliceExportRegistry()
+{
+    owned_.push_back(std::make_unique<SlmSliceWriter>());
+    owned_.push_back(std::make_unique<CliWriter>());
+    owned_.push_back(std::make_unique<SvgWriter>());
+    owned_.push_back(std::make_unique<PngWriter>());
+    owned_.push_back(std::make_unique<CsvWriter>());
+    writers_.reserve(owned_.size());
+    for (const std::unique_ptr<IJobWriter>& writer : owned_)
+        writers_.push_back(writer.get());
+}
+
+const SliceExportRegistry& SliceExportRegistry::Instance()
+{
+    static const SliceExportRegistry registry;
+    return registry;
+}
+
+const IJobWriter* SliceExportRegistry::WriterFor(SliceExportFormat format) const
+{
+    for (const IJobWriter* writer : writers_)
+        if (writer->format() == format)
+            return writer;
+    return nullptr;
+}
 
 QString SliceExportFormatName(SliceExportFormat format)
 {
-    switch (format)
-    {
-    case SliceExportFormat::SlmSlice:
-        return QStringLiteral("openSLMSlicer 切片 (.slmslice)");
-    case SliceExportFormat::Cli:
-        return QStringLiteral("CLI 2.0 ASCII (.cli)");
-    }
-    return QString();
+    const IJobWriter* writer = SliceExportRegistry::Instance().WriterFor(format);
+    return writer ? writer->name() : QString();
 }
 
 QString SliceExportFileFilter(SliceExportFormat format)
 {
-    switch (format)
-    {
-    case SliceExportFormat::SlmSlice:
-        return QStringLiteral("openSLMSlicer 切片 (*.slmslice)");
-    case SliceExportFormat::Cli:
-        return QStringLiteral("Common Layer Interface (*.cli)");
-    }
-    return QString();
+    const IJobWriter* writer = SliceExportRegistry::Instance().WriterFor(format);
+    return writer ? writer->fileFilter() : QString();
 }
 
 QString SliceExportSuffix(SliceExportFormat format)
 {
-    switch (format)
-    {
-    case SliceExportFormat::SlmSlice:
-        return QStringLiteral("slmslice");
-    case SliceExportFormat::Cli:
-        return QStringLiteral("cli");
-    }
-    return QString();
+    const IJobWriter* writer = SliceExportRegistry::Instance().WriterFor(format);
+    return writer ? writer->suffix() : QString();
 }
 
 SliceBuildSnapshot BuildSliceBuildSnapshot(
@@ -202,20 +423,15 @@ SliceExportResult ExportSliceBuild(
         return result;
     }
 
-    switch (options.format)
+    const IJobWriter* writer =
+        SliceExportRegistry::Instance().WriterFor(options.format);
+    if (writer == nullptr)
     {
-    case SliceExportFormat::SlmSlice:
-        if (!WriteSlmSliceV1(snapshot, options, progress, result))
-            return result;
-        break;
-    case SliceExportFormat::Cli:
-        if (!WriteCliAscii(snapshot, options, progress, result))
-            return result;
-        break;
-    default:
         result.error = QStringLiteral("不支持的导出格式。");
         return result;
     }
+    if (!writer->write(snapshot, options, progress, result))
+        return result;
 
     result.ok = true;
     if (options.validate_after_write)
@@ -251,16 +467,14 @@ bool SummarizeSliceFile(const QString& path, SliceExportFormat format,
                         SliceFileSummary& summary, QString& error)
 {
     summary = {};
-    SliceBuildSnapshot snapshot;
-    switch (format)
+    const IJobWriter* writer =
+        SliceExportRegistry::Instance().WriterFor(format);
+    if (writer == nullptr)
     {
-    case SliceExportFormat::SlmSlice:
-        return ReadSlmSliceV1(path, snapshot, summary, error);
-    case SliceExportFormat::Cli:
-        return ParseCliAscii(path, summary, error);
+        error = QStringLiteral("不支持的切片文件格式。");
+        return false;
     }
-    error = QStringLiteral("不支持的切片文件格式。");
-    return false;
+    return writer->summarize(path, summary, error);
 }
 
 bool ValidateSliceFile(const QString& path, SliceExportFormat format,

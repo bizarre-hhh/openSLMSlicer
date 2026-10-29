@@ -9,7 +9,7 @@ openSLMSlicer 是一个面向 SLM（选区激光熔化）的 Windows 桌面切�
 - **平台与视角**：可调平台尺寸，透视 / 正交投影切换，视角立方体和场景设置
 - **切片预览**：基于 PySLM C++ 计算轮廓和扫描填充，逐层查看，可分别显隐轮廓、填充、方向箭头和跳转，并统计路径长度
 - **工程文件**：`.slmproj` 单文件工程，内嵌 STL 数据，附带最近工程记录
-- **切片导出**：支持 `.slmslice` 内部格式（逐层 SHA-256 校验）和 CLI 2.0 ASCII，导出后可回读校验
+- **切片导出**：`.slmslice` 内部容器（逐层 SHA-256）、CLI 2.0 ASCII、SVG/PNG 联系人表、CSV 逐层统计；导出后自动回读校验层数、轮廓/填充数与路径长度
 
 ## 技术栈
 
@@ -25,20 +25,31 @@ openSLMSlicer 是一个面向 SLM（选区激光熔化）的 Windows 桌面切�
 | --- | --- |
 | `openSLMSlicer/` | 程序源码，包括窗口、视口、切片引擎、导出与工程读写 |
 | `openSLMSlicer/tests/` | 工程、界面流程、切片和导出测试 |
-| `docs/` | `.slmslice` 格式规格与切片输出设计文档 |
+| `docs/` | `.slmslice` 规格、SVG/PNG/CSV 报告格式与切片输出设计文档 |
 | `asset/` | 示例 STL、着色器、图标等资源 |
 | `slmproj/` | 示例工程和切片文件 |
 | `3rd_party/` | GLFW、Dear ImGui、GLAD、GLM、Assimp、ImGuizmo、PySLM C++ 等依赖 |
 
 ## 切片输出
 
-`.slmslice` 是本程序的内部切片容器，保存逐层几何、空层、模型归属、内外轮廓和填充线，用于预览、回归测试和后续格式转换。CLI 2.0 ASCII 文件则用于把逐层几何交给支持 CLI 的第三方软件导入。
+切片预览有效时，可通过“切片 → 导出切片文件…”（或预览面板的“导出切片…”）导出当前快照，支持五种格式：
 
-需要说明的是，CLI 输出只包含几何，不包含激光功率、扫描速度等工艺参数，不能直接用于设备加工；OVF、3MF 等面向设备的格式尚未实现。
+| 格式 | 用途 | 说明 |
+| --- | --- | --- |
+| `.slmslice` | 内部无损容器 | 保存逐层几何、空层、模型归属、内外轮廓和填充线，逐层 SHA-256；可重新打开预览或另存为其他格式 |
+| `.cli` | 通用几何交换 | CLI 2.0 ASCII，只含层几何，可给支持 CLI 的第三方软件导入 |
+| `.svg` | 预览/报告 | 联系人表：每个非空层一格，含层号与 Z 标签，矢量可缩放 |
+| `.png` | 预览/报告 | 与 SVG 同版式的位图联系人表，直接编码生成，不依赖 Qt 图片插件 |
+| `.csv` | 统计/CI | 每层一行：层号、Z、空层标记、轮廓/填充数量与路径长度 |
+
+导出只读取当前预览快照，不会重新切片，也不修改工程；写入使用临时文件原子替换，支持取消。勾选“导出后校验”会回读文件，校验层数、轮廓数、填充数和路径长度（CLI 因坐标按 4 位小数写出，只校验数量）。
+
+需要说明的是：CLI 输出只包含几何，SVG/PNG/CSV 是报告/统计产物，它们都不包含激光功率、扫描速度等工艺参数，不能直接用于设备加工；面向设备的 OVF、3MF 尚未实现。各报告格式的字段和校验规则见 [docs/slice-report-formats.md](docs/slice-report-formats.md)。
 
 ## 文档
 
 - [docs/slmslice-v1.md](docs/slmslice-v1.md)：`.slmslice` 文件布局、字段和版本兼容规则
+- [docs/slice-report-formats.md](docs/slice-report-formats.md)：SVG/PNG/CSV 报告格式、字段与校验规则
 - [docs/slice-output-design.md](docs/slice-output-design.md)：切片输出格式的设计与演进计划
 
 ## 说明

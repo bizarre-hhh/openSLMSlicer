@@ -81,6 +81,7 @@ set(PROJECT_SOURCES
   "scene_viewport.cpp"
   "slice_engine.cpp"
   "slice_export.cpp"
+  "slice_report_export.cpp"
   "slmslice_format.cpp"
   "cli_format.cpp"
   "camera_controller.cpp"
@@ -234,7 +235,8 @@ if (BUILD_TESTING)
   add_test(NAME slicing_engine COMMAND slicing_tests)
 
   add_executable(slice_export_tests "tests/slice_export_tests.cpp"
-    "slice_export.cpp" "slmslice_format.cpp" "cli_format.cpp")
+    "slice_export.cpp" "slice_report_export.cpp" "slmslice_format.cpp"
+    "cli_format.cpp")
   target_include_directories(slice_export_tests PRIVATE "${APP_SOURCE_DIR}")
   target_link_libraries(slice_export_tests PRIVATE Qt${QT_VERSION_MAJOR}::Core)
   target_compile_definitions(slice_export_tests PRIVATE _CRT_SECURE_NO_WARNINGS)

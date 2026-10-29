@@ -23,13 +23,7 @@
 
 namespace
 {
-QString OtherFormatSuffix(SliceExportFormat format)
-{
-    return SliceExportSuffix(format == SliceExportFormat::SlmSlice
-        ? SliceExportFormat::Cli : SliceExportFormat::SlmSlice);
-}
-
-// Append the suffix of the selected format, or replace the suffix of the other
+// Append the suffix of the selected format, or replace the suffix of any other
 // supported format. Other suffixes typed by the user are kept.
 QString EnsureFormatSuffix(const QString& path, SliceExportFormat format)
 {
@@ -39,10 +33,18 @@ QString EnsureFormatSuffix(const QString& path, SliceExportFormat format)
     const QString suffix = SliceExportSuffix(format);
     if (trimmed.endsWith(QStringLiteral(".") + suffix, Qt::CaseInsensitive))
         return trimmed;
-    const QString other = OtherFormatSuffix(format);
-    if (trimmed.endsWith(QStringLiteral(".") + other, Qt::CaseInsensitive))
-        return trimmed.left(trimmed.size() - other.size() - 1) +
-               QStringLiteral(".") + suffix;
+    for (const IJobWriter* writer : SliceExportRegistry::Instance().Writers())
+    {
+        if (writer->format() == format)
+            continue;
+        const QString other = writer->suffix();
+        if (!other.isEmpty() &&
+            trimmed.endsWith(QStringLiteral(".") + other, Qt::CaseInsensitive))
+        {
+            return trimmed.left(trimmed.size() - other.size() - 1) +
+                   QStringLiteral(".") + suffix;
+        }
+    }
     return trimmed + QStringLiteral(".") + suffix;
 }
 
@@ -98,12 +100,15 @@ ExportSliceDialog::ExportSliceDialog(const SliceBuildSnapshot& snapshot,
     QFormLayout* output_form = new QFormLayout(output_group);
     format_combo_ = new QComboBox(output_group);
     format_combo_->setObjectName(QStringLiteral("exportFormatCombo"));
-    format_combo_->addItem(SliceExportFormatName(SliceExportFormat::SlmSlice),
-                           static_cast<int>(SliceExportFormat::SlmSlice));
-    format_combo_->addItem(SliceExportFormatName(SliceExportFormat::Cli),
-                           static_cast<int>(SliceExportFormat::Cli));
+    for (const IJobWriter* writer :
+         SliceExportRegistry::Instance().Writers())
+    {
+        format_combo_->addItem(writer->name(),
+                               static_cast<int>(writer->format()));
+    }
     format_combo_->setToolTip(QStringLiteral(
-        "M1 支持 .slmslice（无损内部容器）和 CLI 2.0 ASCII（通用交换格式）"));
+        "M1 支持 .slmslice（无损内部容器）、CLI 2.0 ASCII（通用交换格式）"
+        "以及 SVG/PNG/CSV（预览、报告与统计）"));
     output_form->addRow(QStringLiteral("格式"), format_combo_);
 
     path_edit_ = new QLineEdit(output_group);
@@ -124,7 +129,7 @@ ExportSliceDialog::ExportSliceDialog(const SliceBuildSnapshot& snapshot,
     options_group->setObjectName(QStringLiteral("exportOptionsGroup"));
     QVBoxLayout* options_layout = new QVBoxLayout(options_group);
     include_empty_layers_check_ = new QCheckBox(
-        QStringLiteral("包含空层（仅 .slmslice）"), options_group);
+        QStringLiteral("包含空层（.slmslice / CSV）"), options_group);
     include_empty_layers_check_->setObjectName(
         QStringLiteral("exportIncludeEmptyLayersCheck"));
     include_empty_layers_check_->setChecked(true);
@@ -145,7 +150,7 @@ ExportSliceDialog::ExportSliceDialog(const SliceBuildSnapshot& snapshot,
     validate_check_->setObjectName(QStringLiteral("exportValidateCheck"));
     validate_check_->setChecked(true);
     validate_check_->setToolTip(
-        QStringLiteral("写入后回读文件，校验层数、轮廓数和填充数"));
+        QStringLiteral("写入后回读文件，校验层数、轮廓数、填充数和路径长度"));
     options_layout->addWidget(validate_check_);
 
     open_folder_check_ =
@@ -198,7 +203,9 @@ ExportSliceDialog::ExportSliceDialog(const SliceBuildSnapshot& snapshot,
     connect(include_empty_layers_check_, &QCheckBox::toggled, this,
             [this](bool checked)
     {
-        if (Format() == SliceExportFormat::SlmSlice)
+        const SliceExportFormat format = Format();
+        if (format == SliceExportFormat::SlmSlice ||
+            format == SliceExportFormat::Csv)
             include_empty_layers_preference_ = checked;
         UpdateSummary();
     });
@@ -210,9 +217,10 @@ ExportSliceDialog::ExportSliceDialog(const SliceBuildSnapshot& snapshot,
 
 SliceExportFormat ExportSliceDialog::Format() const
 {
-    const int data = format_combo_->currentData().toInt();
-    return data == static_cast<int>(SliceExportFormat::Cli)
-        ? SliceExportFormat::Cli : SliceExportFormat::SlmSlice;
+    const SliceExportFormat format = static_cast<SliceExportFormat>(
+        format_combo_->currentData().toInt());
+    return SliceExportRegistry::Instance().WriterFor(format)
+        ? format : SliceExportFormat::SlmSlice;
 }
 
 QString ExportSliceDialog::OutputPath() const
@@ -229,7 +237,8 @@ SliceExportOptions ExportSliceDialog::Options() const
     options.format = Format();
     options.output_path = OutputPath();
     options.include_empty_layers =
-        options.format == SliceExportFormat::SlmSlice &&
+        (options.format == SliceExportFormat::SlmSlice ||
+         options.format == SliceExportFormat::Csv) &&
         include_empty_layers_check_->isChecked();
     options.include_hatches = include_hatches_check_->isChecked();
     options.validate_after_write = validate_check_->isChecked();
@@ -243,7 +252,17 @@ bool ExportSliceDialog::OpenFolderAfterExport() const
 
 void ExportSliceDialog::SetFormat(SliceExportFormat format)
 {
-    const int index = format == SliceExportFormat::SlmSlice ? 0 : 1;
+    int index = -1;
+    for (int i = 0; i < format_combo_->count(); ++i)
+    {
+        if (format_combo_->itemData(i).toInt() == static_cast<int>(format))
+        {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0)
+        index = 0;
     if (format_combo_->currentIndex() != index)
     {
         const QSignalBlocker blocker(format_combo_);
@@ -290,10 +309,12 @@ void ExportSliceDialog::Browse()
 
 void ExportSliceDialog::UpdateFormatOptions()
 {
-    const bool slmslice = Format() == SliceExportFormat::SlmSlice;
+    const SliceExportFormat format = Format();
+    const bool keeps_empty_layers = format == SliceExportFormat::SlmSlice ||
+                                    format == SliceExportFormat::Csv;
     {
         const QSignalBlocker blocker(include_empty_layers_check_);
-        if (slmslice)
+        if (keeps_empty_layers)
         {
             include_empty_layers_check_->setEnabled(true);
             include_empty_layers_check_->setChecked(
@@ -307,18 +328,46 @@ void ExportSliceDialog::UpdateFormatOptions()
             include_empty_layers_check_->setEnabled(false);
         }
     }
-    include_empty_layers_check_->setToolTip(slmslice
+    include_empty_layers_check_->setToolTip(keeps_empty_layers
         ? QStringLiteral("保留首层和末层之间的 Z 网格空层，使层号连续")
-        : QStringLiteral("CLI 2.0 不写入空层"));
-    hint_label_->setText(slmslice
-        ? QStringLiteral("写入 .slmslice v1 二进制容器：保留 part、空层和逐层校验和。")
-        : QStringLiteral("CLI 2.0 ASCII：只写层几何并跳过空层，不携带工艺参数。"));
+        : QStringLiteral("该格式不写入空层"));
+
+    QString hint;
+    switch (format)
+    {
+    case SliceExportFormat::SlmSlice:
+        hint = QStringLiteral(
+            "写入 .slmslice v1 二进制容器：保留 part、空层和逐层校验和。");
+        break;
+    case SliceExportFormat::Cli:
+        hint = QStringLiteral(
+            "CLI 2.0 ASCII：只写层几何并跳过空层，不携带工艺参数。");
+        break;
+    case SliceExportFormat::Svg:
+        hint = QStringLiteral(
+            "SVG 联系人表：每个非空层一个单元格，含层号/Z 标签，"
+            "矢量可缩放，适合报告与质检对比。");
+        break;
+    case SliceExportFormat::Png:
+        hint = QStringLiteral(
+            "PNG 联系人表：与 SVG 相同的版式栅格化，适合贴进文档或工单。");
+        break;
+    case SliceExportFormat::Csv:
+        hint = QStringLiteral(
+            "CSV 逐层统计：每层一行（层号、Z、轮廓/填充数量与长度），"
+            "可直接 diff、导入表格或作为仿真输入。");
+        break;
+    }
+    hint_label_->setText(hint);
 }
 
 void ExportSliceDialog::UpdateSummary()
 {
+    const SliceExportFormat format = Format();
     const std::size_t valid_layers = layer_count_ - empty_layer_count_;
-    const bool keep_empty = Format() == SliceExportFormat::SlmSlice &&
+    const bool keeps_empty_layers = format == SliceExportFormat::SlmSlice ||
+                                    format == SliceExportFormat::Csv;
+    const bool keep_empty = keeps_empty_layers &&
         include_empty_layers_check_->isChecked();
     const std::size_t written_layers = keep_empty ? layer_count_ : valid_layers;
 
@@ -332,6 +381,16 @@ void ExportSliceDialog::UpdateSummary()
         .arg(NumberText(written_layers))
         .arg(NumberText(contour_count_))
         .arg(NumberText(hatch_count_));
+    if (format == SliceExportFormat::Svg || format == SliceExportFormat::Png)
+    {
+        text += QStringLiteral("\n联系人表：%1 个单元格（每个非空层一格）")
+            .arg(NumberText(valid_layers));
+    }
+    else if (format == SliceExportFormat::Csv)
+    {
+        text += QStringLiteral("\nCSV 数据行：%1 行")
+            .arg(NumberText(written_layers));
+    }
     summary_label_->setText(text);
 }
 

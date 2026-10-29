@@ -172,8 +172,15 @@ SliceExportFormat SliceExportLastFormat()
                              QStringLiteral("openSLMSlicer"));
     const QString suffix =
         settings.value(QStringLiteral("export/last_format")).toString();
-    if (suffix.compare(QStringLiteral("cli"), Qt::CaseInsensitive) == 0)
-        return SliceExportFormat::Cli;
+    if (!suffix.isEmpty())
+    {
+        for (const IJobWriter* writer :
+             SliceExportRegistry::Instance().Writers())
+        {
+            if (writer->suffix().compare(suffix, Qt::CaseInsensitive) == 0)
+                return writer->format();
+        }
+    }
     return SliceExportFormat::SlmSlice;
 }
 
