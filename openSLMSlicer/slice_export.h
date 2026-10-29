@@ -15,12 +15,19 @@
 
 // Export-facing snapshot of one generated slice build. The scene viewport owns
 // the preview data; this value type is what writers/readers and tests use.
+enum class SlicePartKind
+{
+    Model = 0,
+    Support = 1
+};
+
 struct SlicePartInfo
 {
     std::uint64_t id = 0;
     QString name;
     QString source_path;
     std::size_t triangle_count = 0;
+    SlicePartKind kind = SlicePartKind::Model;
 };
 
 struct SliceBuildSnapshot

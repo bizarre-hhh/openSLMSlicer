@@ -111,12 +111,13 @@ M1 的实际范围：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `parts[].id` | number | 模型 id（`uint64` 语义），对应 `model_id` |
-| `parts[].name` | string | 模型名称，UTF-8 |
-| `parts[].source_path` | string | 来源 STL 路径（仅追溯用，可能是空字符串） |
-| `parts[].triangle_count` | number | 模型三角面数 |
+| `parts[].id` | number | 模型/支撑 id（`uint64` 语义），对应 `model_id`；自动生成支撑使用独立号段（从 1,000,000,000 起），不与模型 id 冲突 |
+| `parts[].name` | string | 模型名称或支撑名称，UTF-8 |
+| `parts[].source_path` | string | 来源 STL 路径（仅追溯用，可能是空字符串；支撑为空） |
+| `parts[].triangle_count` | number | 模型/支撑三角面数 |
+| `parts[].kind` | string | **可选**：`"support"` 表示自动生成支撑；省略或未知值视为普通模型 |
 
-v1 不保存 part 的变换矩阵、网格哈希、材料或工艺参数：坐标已经是应用变换后的**平台绝对坐标**。
+v1 不保存 part 的变换矩阵、网格哈希、材料或工艺参数：坐标已经是应用变换后的**平台绝对坐标**。自动生成支撑与模型共用同一套轮廓/填充 payload，仅通过 `parts[].kind` 标注归属；CLI 2.0 没有 part 归属概念，导出时支撑几何与模型几何合并（见第 8 节）。
 
 ### 3.7 `layers`
 
@@ -174,6 +175,13 @@ v1 不保存 part 的变换矩阵、网格哈希、材料或工艺参数：坐�
       "name": "cube",
       "source_path": "D:/models/cube.stl",
       "triangle_count": 12
+    },
+    {
+      "id": 1000000000,
+      "kind": "support",
+      "name": "cube 支撑",
+      "source_path": "",
+      "triangle_count": 1266
     }
   ],
   "source_project_revision": 7,

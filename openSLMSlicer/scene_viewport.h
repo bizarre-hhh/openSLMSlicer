@@ -20,6 +20,8 @@
 #include "model_transform.h"
 #include "slice_engine.h"
 #include "slice_export.h"
+#include "support_engine.h"
+#include "support_types.h"
 
 class BasePlate;
 class Shader;
@@ -88,7 +90,30 @@ public:
         double total_contour_path_length_mm = 0.0;
         double total_hatch_path_length_mm = 0.0;
         double total_path_length_mm = 0.0;
+        // Support sub-totals. The totals above still include the supports.
+        std::size_t support_contour_count = 0;
+        std::size_t support_hatch_count = 0;
+        double support_contour_path_length_mm = 0.0;
+        double support_hatch_path_length_mm = 0.0;
         HatchSettings hatch;
+    };
+
+    struct SupportModelStatus
+    {
+        ModelId owner_model_id = 0;
+        SupportState state = SupportState::None;
+        std::size_t triangle_count = 0;
+        double volume_mm3 = 0.0;
+        QString name;
+    };
+
+    struct SupportGenerateSummary
+    {
+        std::size_t considered = 0;  // models in the scene when generation started
+        std::size_t generated = 0;   // supports created for this model
+        std::size_t skipped = 0;     // model already had a support entry
+        std::size_t not_needed = 0;  // generated and no support required
+        std::size_t failed = 0;      // library failure or model outside the plate
     };
 
     SceneViewport();
@@ -153,9 +178,33 @@ public:
     void SetModelSelected(bool selected) { SetModelSelected(active_model_id_, selected); }
     void SetModelSelected(ModelId id, bool selected);
     void ClearModelSelection();
+    // Moves a loaded model to a new 0-based position in the model list. The
+    // list order is the user-defined slice order used by GenerateSlice().
+    // Returns false only when the model does not exist.
+    bool MoveModelToIndex(ModelId id, std::size_t index);
     bool SelectModelAt(float x_pixels, float y_pixels, glm::vec3* hit_point = nullptr);
     void RemoveStl() { RemoveStl(active_model_id_); }
     void RemoveStl(ModelId id);
+
+    // ---- Automatic supports (one solid block support group per model) ----
+    // Generates supports for every model that has no support entry yet (models
+    // that already have supports or a "no support needed" entry are skipped).
+    // Returns false for fatal errors; per-model problems are appended to issues
+    // and do not abort the remaining models. On cancellation no new support is
+    // committed. Success advances the project revision so stale slice previews
+    // are discarded, and bumps SupportStateRevision() for dirty tracking.
+    bool GenerateSupportsForAll(const SupportProgressCallback& progress,
+                                SupportGenerateSummary& summary, bool& cancelled,
+                                QStringList& issues, QString& error);
+    void DeleteAllSupports();
+    void SetSupportsVisible(bool visible);
+    bool SupportsVisible() const { return supports_visible_; }
+    bool HasGeneratedSupports() const;
+    std::size_t SupportEntryCount() const { return support_entries_.size(); }
+    std::vector<SupportModelStatus> SupportStatuses() const;
+    // Monotonic counter bumped whenever support documents change (generation,
+    // deletion, project load/new). Used by the window's modified flag.
+    std::uint64_t SupportStateRevision() const { return support_state_revision_; }
 
     glm::vec3 PlateSizeMm() const { return plate_size_mm_; }
     bool SetPlateSizeMm(const glm::vec3& size_mm, QString& error);
@@ -220,7 +269,7 @@ private:
         ModelTransform before;
         ModelTransform after;
     };
-    enum class OperationKind { Import, Delete, Transform, PlateSize, AddModels, TransformModels, Rename };
+    enum class OperationKind { Import, Delete, Transform, PlateSize, AddModels, TransformModels, Rename, Reorder };
     struct Operation
     {
         OperationKind kind = OperationKind::Import;
@@ -233,6 +282,9 @@ private:
         ModelTransform after_transform;
         glm::vec3 before_plate_size = PlateDimensions::DefaultSizeMm();
         glm::vec3 after_plate_size = PlateDimensions::DefaultSizeMm();
+        ModelId reorder_id = 0;
+        std::size_t reorder_from = 0;
+        std::size_t reorder_to = 0;
         std::uint64_t before_revision = 0;
         std::uint64_t after_revision = 0;
         QString description;
@@ -247,6 +299,9 @@ private:
         std::uint64_t before_revision = 0;
     };
     SavedModel CaptureModel(const ModelEntry& entry) const;
+    // Reorders models_ without touching project revision or history; used by
+    // MoveModelToIndex() and by Undo/Redo replay.
+    bool MoveModelToIndexInternal(ModelId id, std::size_t index);
     bool RestoreModel(const SavedModel& saved, QString& error);
     bool RestoreModels(const std::vector<SavedModel>& saved, QString& error);
     bool BuildModelEntry(const SavedModel& saved, ModelEntry& entry, QString& error);
@@ -294,6 +349,25 @@ private:
     void DrawSlicePreview(const glm::mat4& view, const glm::mat4& projection);
     void UploadSliceLayer();
 
+    // ---- Support helpers ----
+    SupportGroup* FindSupportGroup(ModelId owner_model_id);
+    const SupportGroup* FindSupportGroup(ModelId owner_model_id) const;
+    std::vector<SliceTriangle> SupportWorldTrianglesFor(const SupportGroup& group) const;
+    void DeleteSupportsForModel(ModelId owner_model_id);
+    // Applies the edit policy: X/Y translation is allowed (geometry follows the
+    // model), rotation/scale/Z translation removes the supports.
+    void InvalidateSupportsAfterTransform(const ModelEntry& entry);
+    void MarkSupportsDocumentChanged();
+    void UploadSupportMesh();
+    void DrawSupportMesh(const glm::mat4& view, const glm::mat4& projection);
+    void AppendSupportSliceInputs(std::vector<SliceModelInput>& inputs) const;
+    void AppendSupportExportParts(std::vector<SlicePartInfo>& parts) const;
+    void ComputeSupportSliceStats(const std::vector<SliceLayer>& layers);
+    static bool IsSupportSliceModelId(std::uint64_t model_id)
+    {
+        return model_id >= kSupportIdBase;
+    }
+
     GLFWwindow* window_ = nullptr;
     void* previous_ime_context_ = nullptr;
     bool glfw_initialized_ = false;
@@ -313,6 +387,18 @@ private:
     unsigned int bounds_vbo_ = 0;
     unsigned int slice_vao_ = 0;
     unsigned int slice_vbo_ = 0;
+    unsigned int support_vao_ = 0;
+    unsigned int support_vbo_ = 0;
+    int support_vertex_count_ = 0;
+    bool supports_visible_ = true;
+    bool support_mesh_dirty_ = true;
+    SupportId next_support_id_ = kSupportIdBase;
+    std::uint64_t support_state_revision_ = 0;
+    std::vector<SupportGroup> support_entries_;
+    std::size_t slice_support_contour_count_ = 0;
+    std::size_t slice_support_hatch_count_ = 0;
+    double slice_support_contour_path_length_mm_ = 0.0;
+    double slice_support_hatch_path_length_mm_ = 0.0;
     int slice_contour_vertex_count_ = 0;
     int slice_hatch_vertex_count_ = 0;
     int slice_arrow_vertex_count_ = 0;

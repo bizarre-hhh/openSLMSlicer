@@ -62,6 +62,20 @@ QJsonObject HatchSettingsJson(const HatchSettings& hatch)
     return object;
 }
 
+// "kind" is an optional v1 header field (see docs/slmslice-v1.md 3.6 / 7):
+// writers only emit it for support parts, so files written before automatic
+// support existed keep their exact header shape. Readers treat a missing or
+// unknown value as Model instead of rejecting the file.
+SlicePartKind ReadPartKindJson(const QJsonObject& object)
+{
+    if (object.value(QStringLiteral("kind")).toString() ==
+        QStringLiteral("support"))
+    {
+        return SlicePartKind::Support;
+    }
+    return SlicePartKind::Model;
+}
+
 void ReadHatchSettingsJson(const QJsonObject& object, HatchSettings& hatch)
 {
     hatch.enabled = object.value(QStringLiteral("enabled")).toBool(hatch.enabled);
@@ -317,6 +331,11 @@ bool WriteSlmSliceV1(const SliceBuildSnapshot& snapshot,
         object.insert(QStringLiteral("source_path"), part.source_path);
         object.insert(QStringLiteral("triangle_count"),
                       static_cast<qint64>(part.triangle_count));
+        // Optional field: only support parts are tagged, so a snapshot without
+        // supports writes a byte-identical v1 header. Model parts omit "kind"
+        // and are read back as SlicePartKind::Model (the default).
+        if (part.kind == SlicePartKind::Support)
+            object.insert(QStringLiteral("kind"), QStringLiteral("support"));
         parts.append(object);
     }
 
@@ -496,6 +515,7 @@ bool ReadSlmSliceV1(const QString& path, SliceBuildSnapshot& snapshot,
         part.source_path = object.value(QStringLiteral("source_path")).toString();
         part.triangle_count = static_cast<std::size_t>(
             object.value(QStringLiteral("triangle_count")).toDouble());
+        part.kind = ReadPartKindJson(object);
         loaded.parts.push_back(std::move(part));
     }
 
@@ -641,6 +661,7 @@ bool ReadSlmSliceV1Info(const QString& path, SliceFileInfo& info,
         part.source_path = object.value(QStringLiteral("source_path")).toString();
         part.triangle_count = static_cast<std::size_t>(
             object.value(QStringLiteral("triangle_count")).toDouble());
+        part.kind = ReadPartKindJson(object);
         info.parts.push_back(std::move(part));
     }
 

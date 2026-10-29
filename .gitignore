@@ -20,6 +20,8 @@ imgui.ini
 /slmproj/*.slmproj
 /slmproj/*.slmslice
 /slmproj/*.cli
+/slmproj/*.png
+/slmproj/*.svg
 
 # Operating system noise
 Thumbs.db

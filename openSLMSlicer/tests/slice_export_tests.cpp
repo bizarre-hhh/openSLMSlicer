@@ -5,10 +5,15 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QString>
 #include <QTemporaryDir>
+#include <QtEndian>
 
 #include <cmath>
+#include <functional>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -122,6 +127,106 @@ SliceBuildSnapshot MakeReportSnapshot(std::vector<SliceLayer>* layers_out = null
     if (layers_out != nullptr)
         *layers_out = snapshot.layers;
     return snapshot;
+}
+
+// Support geometry ids start at 1e9 (see support_types.h) so they never collide
+// with model ids; tests only need the value, not the support headers.
+constexpr std::uint64_t kSupportPartId = 1000000000ull;
+
+// One model part (id 1) and one support part (id 1e9) with geometry on the same
+// layer: a 10 x 10 mm model square/hatch plus a 5 x 5 mm support square/hatch.
+SliceBuildSnapshot MakeSupportSnapshot()
+{
+    SliceLayer layer;
+    layer.grid_index = 0;
+    layer.z_mm = 0.015;
+    layer.contours.push_back(
+        MakeRing(1, SliceRingRole::Outer, 0.0, 0.0, 10.0));
+    layer.contours.push_back(
+        MakeRing(kSupportPartId, SliceRingRole::Outer, 20.0, 0.0, 5.0));
+    layer.hatches.push_back(MakeHatch(1, 0.0, 0.0, 10.0, 0.0));
+    layer.hatches.push_back(
+        MakeHatch(kSupportPartId, 20.0, 0.0, 25.0, 0.0));
+
+    SliceBuildSnapshot snapshot = MakeSnapshot({layer});
+    SlicePartInfo support;
+    support.id = kSupportPartId;
+    support.name = QStringLiteral("立方体 支撑");
+    support.source_path = QStringLiteral("D:/模型/cube.stl");
+    support.triangle_count = 64;
+    support.kind = SlicePartKind::Support;
+    snapshot.parts.push_back(support);
+    return snapshot;
+}
+
+// Reads the JSON header of a .slmslice file, reusing the layout documented in
+// docs/slmslice-v1.md: magic (8) + version (4) + header_bytes (4) + header.
+bool ReadSlmSliceHeader(const QString& path, QJsonObject& header)
+{
+    QByteArray bytes;
+    if (!ReadFileBytes(path, bytes) || bytes.size() < 16)
+        return false;
+    const quint32 header_bytes = qFromLittleEndian<quint32>(
+        reinterpret_cast<const uchar*>(bytes.constData()) + 12);
+    if (static_cast<qint64>(header_bytes) > bytes.size() - 16)
+        return false;
+    const QJsonDocument document =
+        QJsonDocument::fromJson(bytes.mid(16, static_cast<int>(header_bytes)));
+    if (!document.isObject())
+        return false;
+    header = document.object();
+    return true;
+}
+
+// Rewrites a .slmslice file with a modified header parts[] array, keeping the
+// version, payload and every other header field intact. Used to emulate files
+// written by an older version (no "kind") or by a newer writer (unknown kind).
+bool RewriteSlmSliceParts(
+    const QString& source, const QString& target,
+    const std::function<void(QJsonObject&)>& mutate_part)
+{
+    QByteArray bytes;
+    if (!ReadFileBytes(source, bytes) || bytes.size() < 16)
+        return false;
+    const quint32 old_header_bytes = qFromLittleEndian<quint32>(
+        reinterpret_cast<const uchar*>(bytes.constData()) + 12);
+    if (static_cast<qint64>(old_header_bytes) > bytes.size() - 16)
+        return false;
+    const QJsonDocument document =
+        QJsonDocument::fromJson(bytes.mid(16, static_cast<int>(old_header_bytes)));
+    if (!document.isObject())
+        return false;
+
+    QJsonObject header = document.object();
+    QJsonArray parts = header.value(QStringLiteral("parts")).toArray();
+    for (int i = 0; i < parts.size(); ++i)
+    {
+        QJsonObject part = parts.at(i).toObject();
+        mutate_part(part);
+        parts.replace(i, part);
+    }
+    header.insert(QStringLiteral("parts"), parts);
+    const QByteArray header_raw =
+        QJsonDocument(header).toJson(QJsonDocument::Indented);
+
+    QByteArray rewritten;
+    rewritten.append(bytes.constData(), 8);       // magic
+    rewritten.append(bytes.constData() + 8, 4);   // version (little-endian)
+    uchar header_bytes_le[4] = {0, 0, 0, 0};
+    qToLittleEndian<quint32>(static_cast<quint32>(header_raw.size()),
+                             static_cast<void*>(header_bytes_le));
+    rewritten.append(reinterpret_cast<const char*>(header_bytes_le), 4);
+    rewritten.append(header_raw);
+    rewritten.append(bytes.constData() + 16 + static_cast<int>(old_header_bytes),
+                     bytes.size() - 16 - static_cast<int>(old_header_bytes));
+
+    QFile file(target);
+    if (!file.open(QIODevice::WriteOnly))
+        return false;
+    if (file.write(rewritten) != rewritten.size())
+        return false;
+    file.close();
+    return true;
 }
 
 bool TestSnapshotEmptyLayerFill()
@@ -798,6 +903,301 @@ bool TestInvalidPathFails(const QString& directory)
            Require(!result.error.isEmpty(), "invalid path should report an error");
 }
 
+// A support part must keep its kind through .slmslice export/read-back while the
+// payload (layers, contours, hatches, lengths) stays exactly the v1 geometry.
+bool TestSlmSliceSupportPartRoundTrip(const QString& directory)
+{
+    const SliceBuildSnapshot snapshot = MakeSupportSnapshot();
+    SliceExportOptions options;
+    options.format = SliceExportFormat::SlmSlice;
+    options.output_path =
+        QDir(directory).filePath(QStringLiteral("support.slmslice"));
+    options.include_empty_layers = true;
+    options.validate_after_write = true;
+    const SliceExportResult result = ExportSliceBuild(snapshot, options);
+    if (!Require(result.ok, "support slmslice export failed: " +
+                                result.error.toStdString()))
+        return false;
+    if (!Require(result.contours_written == 2 && result.hatches_written == 2,
+                 "support export geometry counters"))
+        return false;
+
+    // Header: v1 unchanged, only the support part is tagged; model parts must
+    // not gain an optional field so support-free headers stay identical.
+    QJsonObject header;
+    if (!Require(ReadSlmSliceHeader(options.output_path, header),
+                 "read support slmslice header"))
+        return false;
+    if (!Require(header.value(QStringLiteral("version")).toInt() == 1,
+                 "support slmslice header version"))
+        return false;
+    const QJsonArray header_parts =
+        header.value(QStringLiteral("parts")).toArray();
+    if (!Require(header_parts.size() == 3, "support header part count"))
+        return false;
+    for (int i = 0; i < 2; ++i)
+        if (!Require(!header_parts.at(i).toObject().contains(
+                         QStringLiteral("kind")),
+                     "model part must omit the optional kind field"))
+            return false;
+    if (!Require(header_parts.at(2).toObject()
+                         .value(QStringLiteral("kind")).toString() ==
+                     QStringLiteral("support"),
+                 "support part header kind"))
+        return false;
+
+    SliceBuildSnapshot loaded;
+    QString error;
+    if (!Require(ReadSlmSliceFile(options.output_path, loaded, error),
+                 "support slmslice read failed: " + error.toStdString()))
+        return false;
+    if (!Require(loaded.parts.size() == 3, "support read part count") ||
+        !Require(loaded.parts[0].kind == SlicePartKind::Model,
+                 "first model part kind roundtrip") ||
+        !Require(loaded.parts[1].kind == SlicePartKind::Model,
+                 "second model part kind roundtrip") ||
+        !Require(loaded.parts[2].kind == SlicePartKind::Support,
+                 "support part kind roundtrip") ||
+        !Require(loaded.parts[2].id == kSupportPartId,
+                 "support part id roundtrip") ||
+        !Require(loaded.parts[2].name == QStringLiteral("立方体 支撑"),
+                 "support part name roundtrip") ||
+        !Require(loaded.parts[2].triangle_count == 64,
+                 "support part triangle count roundtrip"))
+        return false;
+
+    SliceFileInfo info;
+    if (!Require(ReadSlmSliceFileInfo(options.output_path, info, error),
+                 "support slmslice info read failed: " + error.toStdString()))
+        return false;
+    if (!Require(info.parts.size() == 3, "support info part count") ||
+        !Require(info.parts[0].kind == SlicePartKind::Model,
+                 "support info model part kind") ||
+        !Require(info.parts[2].kind == SlicePartKind::Support,
+                 "support info part kind"))
+        return false;
+
+    if (!Require(loaded.layers.size() == snapshot.layers.size(),
+                 "support layer count roundtrip"))
+        return false;
+    for (std::size_t i = 0; i < snapshot.layers.size(); ++i)
+    {
+        if (!Require(loaded.layers[i].contours.size() ==
+                         snapshot.layers[i].contours.size(),
+                     "support contour count roundtrip") ||
+            !Require(loaded.layers[i].hatches.size() ==
+                         snapshot.layers[i].hatches.size(),
+                     "support hatch count roundtrip") ||
+            !Require(std::abs(loaded.layers[i].contour_path_length_mm -
+                              SliceLayerContourLengthMm(snapshot.layers[i])) <
+                         kTolerance,
+                     "support contour length roundtrip") ||
+            !Require(std::abs(loaded.layers[i].hatch_path_length_mm -
+                              SliceLayerHatchLengthMm(snapshot.layers[i])) <
+                         kTolerance,
+                     "support hatch length roundtrip"))
+            return false;
+    }
+    return Require(loaded.layers[0].contours[1].model_id == kSupportPartId,
+                   "support contour model id roundtrip") &&
+           Require(loaded.layers[0].hatches[1].model_id == kSupportPartId,
+                   "support hatch model id roundtrip") &&
+           Require(std::abs(loaded.layers[0].contour_path_length_mm - 60.0) <
+                       kTolerance,
+                   "support contour length total") &&
+           Require(std::abs(loaded.layers[0].hatch_path_length_mm - 15.0) <
+                       kTolerance,
+                   "support hatch length total");
+}
+
+// Backward/forward compatibility of the optional header field: files without
+// "kind" (written by an older build, or hand-made) and files with unknown kind
+// values must still read as Model parts instead of failing.
+bool TestSlmSlicePartKindCompatibility(const QString& directory)
+{
+    // 1. A model-only snapshot writes exactly the pre-support v1 header.
+    const SliceBuildSnapshot model_snapshot = MakeReportSnapshot();
+    SliceExportOptions options;
+    options.format = SliceExportFormat::SlmSlice;
+    options.output_path =
+        QDir(directory).filePath(QStringLiteral("legacy-parts.slmslice"));
+    options.include_empty_layers = true;
+    options.validate_after_write = true;
+    const SliceExportResult legacy = ExportSliceBuild(model_snapshot, options);
+    if (!Require(legacy.ok, "legacy parts export failed: " +
+                                legacy.error.toStdString()))
+        return false;
+
+    QJsonObject header;
+    if (!Require(ReadSlmSliceHeader(options.output_path, header),
+                 "read legacy parts header"))
+        return false;
+    const QJsonArray legacy_parts =
+        header.value(QStringLiteral("parts")).toArray();
+    for (int i = 0; i < legacy_parts.size(); ++i)
+        if (!Require(!legacy_parts.at(i).toObject().contains(
+                         QStringLiteral("kind")),
+                     "model-only header must not contain kind"))
+            return false;
+
+    SliceBuildSnapshot loaded;
+    QString error;
+    if (!Require(ReadSlmSliceFile(options.output_path, loaded, error),
+                 "legacy slmslice read failed: " + error.toStdString()))
+        return false;
+    for (const SlicePartInfo& part : loaded.parts)
+        if (!Require(part.kind == SlicePartKind::Model,
+                     "missing kind must read as model"))
+            return false;
+    SliceFileInfo info;
+    if (!Require(ReadSlmSliceFileInfo(options.output_path, info, error),
+                 "legacy slmslice info read failed: " + error.toStdString()))
+        return false;
+    for (const SlicePartInfo& part : info.parts)
+        if (!Require(part.kind == SlicePartKind::Model,
+                     "missing info kind must read as model"))
+            return false;
+
+    // 2. Strip "kind" from a support file: an old reader (and our tolerant
+    //    reader) sees plain model parts and the geometry is unchanged.
+    const SliceBuildSnapshot support_snapshot = MakeSupportSnapshot();
+    options.output_path =
+        QDir(directory).filePath(QStringLiteral("support-full.slmslice"));
+    const SliceExportResult full = ExportSliceBuild(support_snapshot, options);
+    if (!Require(full.ok, "support reference export failed: " +
+                              full.error.toStdString()))
+        return false;
+
+    const QString stripped_path =
+        QDir(directory).filePath(QStringLiteral("support-stripped.slmslice"));
+    if (!Require(RewriteSlmSliceParts(
+                     options.output_path, stripped_path,
+                     [](QJsonObject& part)
+                     { part.remove(QStringLiteral("kind")); }),
+                 "strip kind from support header"))
+        return false;
+    SliceBuildSnapshot stripped;
+    if (!Require(ReadSlmSliceFile(stripped_path, stripped, error),
+                 "stripped-kind read failed: " + error.toStdString()))
+        return false;
+    if (!Require(stripped.parts.size() == support_snapshot.parts.size(),
+                 "stripped-kind part count") ||
+        !Require(stripped.parts.back().kind == SlicePartKind::Model,
+                 "stripped support kind must read as model") ||
+        !Require(stripped.layers.size() == support_snapshot.layers.size(),
+                 "stripped-kind layer count") ||
+        !Require(stripped.layers[0].contours.size() == 2 &&
+                     stripped.layers[0].hatches.size() == 2,
+                 "stripped-kind geometry unchanged"))
+        return false;
+
+    // 3. Unknown kind values are tolerated and fall back to Model.
+    const QString unknown_path =
+        QDir(directory).filePath(QStringLiteral("support-unknown-kind.slmslice"));
+    if (!Require(RewriteSlmSliceParts(
+                     options.output_path, unknown_path,
+                     [](QJsonObject& part)
+                     {
+                         if (part.value(QStringLiteral("kind")).toString() ==
+                             QStringLiteral("support"))
+                             part.insert(QStringLiteral("kind"),
+                                         QStringLiteral("composite"));
+                     }),
+                 "rewrite unknown support kind"))
+        return false;
+    SliceBuildSnapshot unknown;
+    if (!Require(ReadSlmSliceFile(unknown_path, unknown, error),
+                 "unknown-kind read failed: " + error.toStdString()))
+        return false;
+    if (!Require(unknown.parts.back().kind == SlicePartKind::Model,
+                 "unknown kind must read as model"))
+        return false;
+    SliceFileInfo unknown_info;
+    return Require(ReadSlmSliceFileInfo(unknown_path, unknown_info, error),
+                   "unknown-kind info read failed: " + error.toStdString()) &&
+           Require(unknown_info.parts.back().kind == SlicePartKind::Model,
+                   "unknown info kind must read as model");
+}
+
+// CLI/CSV reports do not know about part kinds: support geometry is counted
+// like any other geometry (CLI ids stay 0, no $$LABEL), so the existing report
+// structure and count conventions are preserved.
+bool TestReportFormatsWithSupportParts(const QString& directory)
+{
+    const SliceBuildSnapshot snapshot = MakeSupportSnapshot();
+
+    SliceExportOptions options;
+    options.format = SliceExportFormat::Cli;
+    options.output_path =
+        QDir(directory).filePath(QStringLiteral("support.cli"));
+    options.validate_after_write = true;
+    const SliceExportResult cli = ExportSliceBuild(snapshot, options);
+    if (!Require(cli.ok, "support CLI export failed: " +
+                             cli.error.toStdString()))
+        return false;
+    QFile cli_file(options.output_path);
+    if (!Require(cli_file.open(QIODevice::ReadOnly), "open support CLI"))
+        return false;
+    const QString cli_text = QString::fromUtf8(cli_file.readAll());
+    cli_file.close();
+    if (!Require(cli_text.contains(QStringLiteral("$$LAYERS/1")),
+                 "support CLI layer count") ||
+        !Require(cli_text.contains(QStringLiteral("$$POLYLINE/0,1,")),
+                 "support CLI polyline id stays 0") ||
+        !Require(cli_text.contains(QStringLiteral("$$HATCHES/0,")),
+                 "support CLI hatches id stays 0") ||
+        !Require(!cli_text.contains(QStringLiteral("$$LABEL")),
+                 "support CLI must not write part labels") ||
+        !Require(cli_text.contains(QStringLiteral("$$GEOMETRYEND")),
+                 "support CLI geometry end"))
+        return false;
+
+    SliceFileSummary summary;
+    QString error;
+    if (!Require(SummarizeSliceFile(options.output_path,
+                                    SliceExportFormat::Cli, summary, error),
+                 "support CLI summarize failed: " + error.toStdString()))
+        return false;
+    if (!Require(summary.layers == 1 && summary.contours == 2 &&
+                     summary.hatches == 2,
+                 "support CLI summary counts"))
+        return false;
+
+    options.format = SliceExportFormat::Csv;
+    options.output_path =
+        QDir(directory).filePath(QStringLiteral("support.csv"));
+    options.include_empty_layers = true;
+    const SliceExportResult csv = ExportSliceBuild(snapshot, options);
+    if (!Require(csv.ok, "support CSV export failed: " +
+                             csv.error.toStdString()))
+        return false;
+    if (!Require(SummarizeSliceFile(options.output_path,
+                                    SliceExportFormat::Csv, summary, error),
+                 "support CSV summarize failed: " + error.toStdString()))
+        return false;
+    if (!Require(summary.layers == 1 && summary.contours == 2 &&
+                     summary.hatches == 2,
+                 "support CSV summary counts") ||
+        !Require(std::abs(summary.contour_length_mm - 60.0) <
+                     kReportLengthTolerance,
+                 "support CSV contour length") ||
+        !Require(std::abs(summary.hatch_length_mm - 15.0) <
+                     kReportLengthTolerance,
+                 "support CSV hatch length"))
+        return false;
+    QFile csv_file(options.output_path);
+    if (!Require(csv_file.open(QIODevice::ReadOnly), "open support CSV"))
+        return false;
+    const QString csv_text = QString::fromUtf8(csv_file.readAll());
+    return Require(csv_text.startsWith(QStringLiteral(
+                       "grid_index,z_mm,empty,contours,hatches,"
+                       "contour_length_mm,hatch_length_mm,total_length_mm\n")),
+                   "support CSV header unchanged") &&
+           Require(csv_text.contains(QStringLiteral(
+                       "0,0.015000,0,2,2,60.000000,15.000000,75.000000")),
+                   "support CSV data row counts all geometry");
+}
+
 // Optional debugging hook: set SLMSLICER_EXPORT_TEST_ARTIFACTS to a directory
 // to keep one sample per report format for inspection with external tools.
 bool ExportSampleArtifacts(const QString& directory)
@@ -825,6 +1225,16 @@ bool ExportSampleArtifacts(const QString& directory)
                                     result.error.toStdString()))
             return false;
     }
+    // Extra sample with a support part so the optional header kind can be
+    // inspected with external tools.
+    SliceExportOptions support_options;
+    support_options.format = SliceExportFormat::SlmSlice;
+    support_options.output_path = QDir(target).filePath(
+        QStringLiteral("sample-support.slmslice"));
+    support_options.validate_after_write = false;
+    if (!Require(ExportSliceBuild(MakeSupportSnapshot(), support_options).ok,
+                 "support artifact export failed"))
+        return false;
     (void)directory;
     return true;
 }
@@ -871,8 +1281,14 @@ int main()
         return 16;
     if (!TestInvalidPathFails(directory.path()))
         return 17;
-    if (!ExportSampleArtifacts(directory.path()))
+    if (!TestSlmSliceSupportPartRoundTrip(directory.path()))
         return 18;
+    if (!TestSlmSlicePartKindCompatibility(directory.path()))
+        return 19;
+    if (!TestReportFormatsWithSupportParts(directory.path()))
+        return 20;
+    if (!ExportSampleArtifacts(directory.path()))
+        return 21;
 
     std::cout << "PASSED\n";
     return 0;

@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <utility>
 #include <QFile>
 #include <QFileInfo>
 #include <QCoreApplication>
@@ -324,6 +325,20 @@ bool SceneViewport::Initialize()
     glEnableVertexAttribArray(1);
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    // Support blocks share the same unlit position/color layout as bounds.
+    glGenVertexArrays(1, &support_vao_);
+    glGenBuffers(1, &support_vbo_);
+    glBindVertexArray(support_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, support_vbo_);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                          reinterpret_cast<const void*>(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    support_mesh_dirty_ = true;
     return true;
 }
 
@@ -601,6 +616,98 @@ void SceneViewport::DrawSlicePreview(const glm::mat4& view, const glm::mat4& pro
     glBindVertexArray(0);
 }
 
+void SceneViewport::UploadSupportMesh()
+{
+    if (window_ == nullptr || !glad_ready_ || support_vao_ == 0 ||
+        support_vbo_ == 0)
+        return;
+
+    // Recompute world-space triangles from the owner's current XY center. The
+    // local geometry only stores X/Y relative to that center (see
+    // support_types.h), so translation in X/Y moves supports without a rebuild.
+    std::size_t triangle_count = 0;
+    for (const SupportGroup& group : support_entries_)
+        if (group.state == SupportState::Generated)
+            triangle_count += group.local_triangles.size();
+    std::vector<float> vertices;
+    vertices.reserve(triangle_count * 18);
+    const glm::vec3 color(0.10f, 0.62f, 0.52f);
+    for (const SupportGroup& group : support_entries_)
+    {
+        if (group.state != SupportState::Generated || group.local_triangles.empty())
+            continue;
+        const ModelEntry* owner = FindModel(group.owner_model_id);
+        if (owner == nullptr)
+            continue;
+        const std::vector<SliceTriangle> world = SupportWorldTriangles(
+            group.local_triangles,
+            static_cast<double>(owner->info.world_position_mm.x),
+            static_cast<double>(owner->info.world_position_mm.y));
+        for (const SliceTriangle& triangle : world)
+            for (const auto& vertex : triangle.vertices)
+            {
+                vertices.push_back(static_cast<float>(
+                    vertex[0] / BasePlate::kMmPerWorldUnit));
+                vertices.push_back(static_cast<float>(
+                    vertex[1] / BasePlate::kMmPerWorldUnit));
+                vertices.push_back(static_cast<float>(
+                    vertex[2] / BasePlate::kMmPerWorldUnit));
+                vertices.push_back(color.x);
+                vertices.push_back(color.y);
+                vertices.push_back(color.z);
+            }
+    }
+
+    glfwMakeContextCurrent(window_);
+    glBindVertexArray(support_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, support_vbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(vertices.size() * sizeof(float)),
+                 vertices.empty() ? nullptr : vertices.data(), GL_DYNAMIC_DRAW);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    support_vertex_count_ = static_cast<int>(vertices.size() / 6);
+    support_mesh_dirty_ = false;
+}
+
+void SceneViewport::DrawSupportMesh(const glm::mat4& view,
+                                    const glm::mat4& projection)
+{
+    if (models_hidden_ || !supports_visible_ || support_vertex_count_ <= 0 ||
+        !plate_shader_ || support_vao_ == 0)
+        return;
+
+    GLboolean previous_depth_test = glIsEnabled(GL_DEPTH_TEST);
+    GLboolean previous_depth_write = GL_TRUE;
+    GLint previous_depth_function = GL_LESS;
+    GLboolean previous_cull_face = glIsEnabled(GL_CULL_FACE);
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &previous_depth_write);
+    glGetIntegerv(GL_DEPTH_FUNC, &previous_depth_function);
+
+    plate_shader_->use();
+    plate_shader_->setMat4("view", view);
+    plate_shader_->setMat4("projection", projection);
+    plate_shader_->setFloat("alpha", 1.0f);
+    plate_shader_->setFloat("zOffset", 0.0f);
+    // Supports are solid blocks: opaque, depth-tested and not back-face culled.
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    glDisable(GL_CULL_FACE);
+    glBindVertexArray(support_vao_);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(support_vertex_count_));
+    glBindVertexArray(0);
+
+    glDepthMask(previous_depth_write);
+    glDepthFunc(previous_depth_function);
+    if (previous_depth_test)
+        glEnable(GL_DEPTH_TEST);
+    else
+        glDisable(GL_DEPTH_TEST);
+    if (previous_cull_face)
+        glEnable(GL_CULL_FACE);
+}
+
 bool SceneViewport::RenderFrame()
 {
     glfwMakeContextCurrent(window_);
@@ -755,6 +862,9 @@ bool SceneViewport::RenderFrame()
     }
     if (!models_hidden_)
         DrawModelBounds(view, projection);
+    if (support_mesh_dirty_ && !models_hidden_ && supports_visible_)
+        UploadSupportMesh();
+    DrawSupportMesh(view, projection);
     DrawSlicePreview(view, projection);
 
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -1140,6 +1250,365 @@ void SceneViewport::ClearModelSelection()
         ++model_state_revision_;
 }
 
+bool SceneViewport::MoveModelToIndexInternal(ModelId id, std::size_t index)
+{
+    const auto found = std::find_if(models_.begin(), models_.end(),
+        [id](const ModelEntry& entry) { return entry.info.id == id; });
+    if (found == models_.end())
+        return false;
+    const std::size_t current =
+        static_cast<std::size_t>(found - models_.begin());
+    index = std::min(index, models_.size() - 1);
+    if (index == current)
+        return true;
+    if (pending_transform_ && pending_transform_->id == id)
+        ReleaseCursor();
+    ModelEntry moved = std::move(*found);
+    models_.erase(found);
+    models_.insert(models_.begin() + static_cast<std::ptrdiff_t>(index),
+                   std::move(moved));
+    ++model_state_revision_;
+    return true;
+}
+
+bool SceneViewport::MoveModelToIndex(ModelId id, std::size_t index)
+{
+    const auto found = std::find_if(models_.begin(), models_.end(),
+        [id](const ModelEntry& entry) { return entry.info.id == id; });
+    if (found == models_.end())
+        return false;
+    const std::size_t current =
+        static_cast<std::size_t>(found - models_.begin());
+    index = std::min(index, models_.size() - 1);
+    if (index == current)
+        return true;
+
+    Operation operation;
+    operation.kind = OperationKind::Reorder;
+    operation.reorder_id = id;
+    operation.reorder_from = current;
+    operation.reorder_to = index;
+    operation.before_revision = project_revision_;
+    operation.description =
+        QStringLiteral("调整模型顺序：%1（第 %2 → %3 位）")
+            .arg(found->info.name)
+            .arg(static_cast<qulonglong>(current + 1))
+            .arg(static_cast<qulonglong>(index + 1));
+    if (!MoveModelToIndexInternal(id, index))
+        return false;
+    AdvanceProjectRevision();
+    operation.after_revision = project_revision_;
+    RecordOperation(std::move(operation));
+    return true;
+}
+
+// ---- Automatic supports -------------------------------------------------
+
+bool SceneViewport::GenerateSupportsForAll(
+    const SupportProgressCallback& progress, SupportGenerateSummary& summary,
+    bool& cancelled, QStringList& issues, QString& error)
+{
+    summary = {};
+    cancelled = false;
+    issues.clear();
+    error.clear();
+    if (models_.empty())
+    {
+        error = QStringLiteral("场景中没有模型，请先导入 STL 模型再生成支撑。");
+        return false;
+    }
+    if (window_ == nullptr || graphics_released_)
+    {
+        error = QStringLiteral("场景尚未就绪，无法生成支撑。");
+        return false;
+    }
+
+    constexpr double kPlateToleranceMm = 1.0e-3;
+    const std::size_t total = models_.size();
+    summary.considered = total;
+    std::vector<SupportGroup> staged;
+    staged.reserve(total);
+    std::size_t completed = 0;
+    // The whole batch is staged locally and only committed after every model was
+    // processed, so cancelling never leaves a partially generated document.
+    for (const ModelEntry& entry : models_)
+    {
+        ++completed;
+        const StlModelInfo& info = entry.info;
+        if (FindSupportGroup(info.id) != nullptr)
+        {
+            ++summary.skipped;
+        }
+        else if (info.world_bounds_min_mm.x < -kPlateToleranceMm ||
+                 info.world_bounds_min_mm.y < -kPlateToleranceMm ||
+                 info.world_bounds_max_mm.x > plate_size_mm_.x + kPlateToleranceMm ||
+                 info.world_bounds_max_mm.y > plate_size_mm_.y + kPlateToleranceMm)
+        {
+            ++summary.failed;
+            issues.append(QStringLiteral("%1：模型超出平台范围，已跳过。")
+                .arg(info.name));
+        }
+        else
+        {
+            SupportModelInput input;
+            input.name = info.name.toUtf8().toStdString();
+            entry.model->AppendBuildTrianglesMm(input.world_triangles_mm);
+            input.model_center_x_mm =
+                static_cast<double>(info.world_position_mm.x);
+            input.model_center_y_mm =
+                static_cast<double>(info.world_position_mm.y);
+
+            SupportGenerationOutput output;
+            std::string support_error;
+            bool ok = false;
+            try
+            {
+                ok = GenerateSupportForModel(input, output, support_error);
+            }
+            catch (const std::exception& exception)
+            {
+                support_error = exception.what();
+                ok = false;
+            }
+            catch (...)
+            {
+                support_error = "support generation failed with an unknown exception";
+                ok = false;
+            }
+
+            if (!ok)
+            {
+                ++summary.failed;
+                issues.append(QStringLiteral("%1：%2").arg(info.name,
+                    support_error.empty()
+                        ? QStringLiteral("支撑生成失败。")
+                        : QString::fromUtf8(support_error.c_str())));
+            }
+            else
+            {
+                SupportGroup group;
+                group.id = next_support_id_++;
+                group.owner_model_id = info.id;
+                group.name = (info.name + QStringLiteral(" 支撑"))
+                    .toUtf8().toStdString();
+                group.overhang_angle_deg = kSupportOverhangAngleDeg;
+                group.state = output.state;
+                group.volume_mm3 = output.volume_mm3;
+                group.local_triangles = std::move(output.local_triangles);
+                // Keep the persisted state consistent: Generated always carries
+                // geometry, anything else is recorded as "no support needed".
+                if (group.state != SupportState::Generated ||
+                    group.local_triangles.empty())
+                {
+                    group.state = SupportState::NotNeeded;
+                    group.local_triangles.clear();
+                    group.volume_mm3 = 0.0;
+                    ++summary.not_needed;
+                }
+                group.source_transform = entry.model->Transform();
+                group.source_world_center_z_mm =
+                    static_cast<double>(info.world_position_mm.z);
+                staged.push_back(std::move(group));
+                ++summary.generated;
+            }
+        }
+        if (progress && !progress(completed, total))
+        {
+            cancelled = true;
+            return false;
+        }
+    }
+
+    if (staged.empty())
+        return true; // Nothing new to commit; the document did not change.
+    support_entries_.reserve(support_entries_.size() + staged.size());
+    for (SupportGroup& group : staged)
+        support_entries_.push_back(std::move(group));
+    MarkSupportsDocumentChanged();
+    AdvanceProjectRevision();
+    return true;
+}
+
+void SceneViewport::DeleteAllSupports()
+{
+    if (support_entries_.empty())
+        return;
+    support_entries_.clear();
+    MarkSupportsDocumentChanged();
+    AdvanceProjectRevision();
+}
+
+void SceneViewport::SetSupportsVisible(bool visible)
+{
+    // Purely a display toggle: it must not mark the document dirty nor advance
+    // the project revision, so a stale slice preview stays usable.
+    supports_visible_ = visible;
+}
+
+bool SceneViewport::HasGeneratedSupports() const
+{
+    return std::any_of(support_entries_.begin(), support_entries_.end(),
+        [](const SupportGroup& group)
+        {
+            return group.state == SupportState::Generated &&
+                   !group.local_triangles.empty();
+        });
+}
+
+std::vector<SceneViewport::SupportModelStatus> SceneViewport::SupportStatuses() const
+{
+    std::vector<SupportModelStatus> statuses;
+    statuses.reserve(support_entries_.size());
+    for (const SupportGroup& group : support_entries_)
+    {
+        SupportModelStatus status;
+        status.owner_model_id = group.owner_model_id;
+        status.state = group.state;
+        status.triangle_count = group.local_triangles.size();
+        status.volume_mm3 = group.volume_mm3;
+        status.name = QString::fromUtf8(group.name.c_str());
+        statuses.push_back(std::move(status));
+    }
+    return statuses;
+}
+
+SupportGroup* SceneViewport::FindSupportGroup(ModelId owner_model_id)
+{
+    const auto found = std::find_if(support_entries_.begin(),
+        support_entries_.end(), [owner_model_id](const SupportGroup& group)
+        { return group.owner_model_id == owner_model_id; });
+    return found == support_entries_.end() ? nullptr : &*found;
+}
+
+const SupportGroup* SceneViewport::FindSupportGroup(ModelId owner_model_id) const
+{
+    const auto found = std::find_if(support_entries_.begin(),
+        support_entries_.end(), [owner_model_id](const SupportGroup& group)
+        { return group.owner_model_id == owner_model_id; });
+    return found == support_entries_.end() ? nullptr : &*found;
+}
+
+std::vector<SliceTriangle> SceneViewport::SupportWorldTrianglesFor(
+    const SupportGroup& group) const
+{
+    const ModelEntry* owner = FindModel(group.owner_model_id);
+    if (owner == nullptr)
+        return {};
+    return SupportWorldTriangles(group.local_triangles,
+        static_cast<double>(owner->info.world_position_mm.x),
+        static_cast<double>(owner->info.world_position_mm.y));
+}
+
+void SceneViewport::DeleteSupportsForModel(ModelId owner_model_id)
+{
+    const auto removed = std::remove_if(support_entries_.begin(),
+        support_entries_.end(), [owner_model_id](const SupportGroup& group)
+        { return group.owner_model_id == owner_model_id; });
+    if (removed == support_entries_.end())
+        return;
+    support_entries_.erase(removed, support_entries_.end());
+    MarkSupportsDocumentChanged();
+}
+
+void SceneViewport::InvalidateSupportsAfterTransform(const ModelEntry& entry)
+{
+    SupportGroup* group = FindSupportGroup(entry.info.id);
+    if (group == nullptr)
+        return;
+    const ModelTransform& current = entry.model->Transform();
+    const ModelTransform& source = group->source_transform;
+    // X/Y translation keeps the supports because their geometry is derived from
+    // the owner's current XY center. Rotation, scale and Z translation break
+    // that relation, so the (irreversible) supports are removed instead.
+    const bool rotation_changed = glm::any(glm::greaterThan(
+        glm::abs(current.rotation_degrees - source.rotation_degrees),
+        glm::vec3(1.0e-4f)));
+    const bool scale_changed = glm::any(glm::greaterThan(
+        glm::abs(current.scale - source.scale), glm::vec3(1.0e-6f)));
+    // Compare the world center Z, not the local translation Z: for a rotated
+    // model an X/Y world move requires a local Z component and vice versa.
+    const bool z_changed =
+        std::abs(static_cast<double>(entry.info.world_position_mm.z) -
+                 group->source_world_center_z_mm) > 1.0e-4;
+    if (rotation_changed || scale_changed || z_changed)
+    {
+        DeleteSupportsForModel(entry.info.id);
+        return;
+    }
+    support_mesh_dirty_ = true;
+}
+
+void SceneViewport::MarkSupportsDocumentChanged()
+{
+    support_mesh_dirty_ = true;
+    ++support_state_revision_;
+}
+
+void SceneViewport::AppendSupportSliceInputs(
+    std::vector<SliceModelInput>& inputs) const
+{
+    for (const SupportGroup& group : support_entries_)
+    {
+        if (group.state != SupportState::Generated || group.local_triangles.empty())
+            continue;
+        const ModelEntry* owner = FindModel(group.owner_model_id);
+        if (owner == nullptr)
+            continue;
+        SliceModelInput input;
+        input.id = group.id;
+        input.name = group.name;
+        input.is_support = true;
+        input.triangles = SupportWorldTrianglesFor(group);
+        inputs.push_back(std::move(input));
+    }
+}
+
+void SceneViewport::AppendSupportExportParts(
+    std::vector<SlicePartInfo>& parts) const
+{
+    std::vector<const SupportGroup*> groups;
+    groups.reserve(support_entries_.size());
+    for (const SupportGroup& group : support_entries_)
+        if (group.state == SupportState::Generated && !group.local_triangles.empty())
+            groups.push_back(&group);
+    // Ascending id order keeps the exported part list deterministic.
+    std::sort(groups.begin(), groups.end(),
+        [](const SupportGroup* a, const SupportGroup* b)
+        { return a->id < b->id; });
+    for (const SupportGroup* group : groups)
+    {
+        SlicePartInfo part;
+        part.id = group->id;
+        part.name = QString::fromUtf8(group->name.c_str());
+        part.triangle_count = group->local_triangles.size();
+        part.kind = SlicePartKind::Support;
+        parts.push_back(std::move(part));
+    }
+}
+
+void SceneViewport::ComputeSupportSliceStats(const std::vector<SliceLayer>& layers)
+{
+    slice_support_contour_count_ = 0;
+    slice_support_hatch_count_ = 0;
+    slice_support_contour_path_length_mm_ = 0.0;
+    slice_support_hatch_path_length_mm_ = 0.0;
+    for (const SliceLayer& layer : layers)
+    {
+        for (const SlicePath& path : layer.contours)
+            if (IsSupportSliceModelId(path.model_id))
+            {
+                ++slice_support_contour_count_;
+                slice_support_contour_path_length_mm_ += SlicePathLengthMm(path);
+            }
+        for (const SliceHatchLine& line : layer.hatches)
+            if (IsSupportSliceModelId(line.model_id))
+            {
+                ++slice_support_hatch_count_;
+                slice_support_hatch_path_length_mm_ += SliceHatchLengthMm(line);
+            }
+    }
+}
+
 std::optional<glm::vec3> SceneViewport::ClosestScenePoint(
     const MouseRay& ray) const
 {
@@ -1481,6 +1950,7 @@ void SceneViewport::EraseModel(ModelId id)
         return;
     if (id == transform_editing_model_id_) EndTransformEditing();
     glfwMakeContextCurrent(window_);
+    DeleteSupportsForModel(id);
     models_.erase(found);
     if (active_model_id_ == id)
         ChooseActiveModel();
@@ -1545,6 +2015,7 @@ bool SceneViewport::ApplyTransform(ModelEntry& entry, const ModelTransform& tran
             return false;
         }
     RefreshModelTransformInfo(entry);
+    InvalidateSupportsAfterTransform(entry);
     RefreshSceneBounds();
     return true;
 }
@@ -1778,6 +2249,10 @@ bool SceneViewport::Undo(QString& error)
         ++model_state_revision_;
         break;
     }
+    case OperationKind::Reorder:
+        if (!MoveModelToIndexInternal(operation.reorder_id, operation.reorder_from))
+            return false;
+        break;
     case OperationKind::TransformModels:
         if (!ApplyTransforms(operation.transforms, false)) return false;
         break;
@@ -1840,6 +2315,10 @@ bool SceneViewport::Redo(QString& error)
         ++model_state_revision_;
         break;
     }
+    case OperationKind::Reorder:
+        if (!MoveModelToIndexInternal(operation.reorder_id, operation.reorder_to))
+            return false;
+        break;
     case OperationKind::TransformModels:
         if (!ApplyTransforms(operation.transforms, true)) return false;
         break;
@@ -2035,6 +2514,9 @@ bool SceneViewport::GenerateSlice(const SliceSettings& settings,
 
     std::vector<SliceModelInput> inputs;
     inputs.reserve(models_.size());
+    // models_ is the loaded-model list order (the user-editable slice order).
+    // SliceBuild keeps this order when appending per-model geometry to layers,
+    // so the preview and the exported files follow the list order as well.
     for (const auto& entry : models_)
     {
         SliceModelInput input;
@@ -2043,6 +2525,9 @@ bool SceneViewport::GenerateSlice(const SliceSettings& settings,
         entry.model->AppendBuildTrianglesMm(input.triangles);
         inputs.push_back(std::move(input));
     }
+    // Supports slice as independent parts with their own id range and the same
+    // hatch settings as the models.
+    AppendSupportSliceInputs(inputs);
 
     SliceResult result;
     try
@@ -2083,6 +2568,7 @@ bool SceneViewport::GenerateSlice(const SliceSettings& settings,
     slice_total_contour_path_length_mm_ = result.total_contour_path_length_mm;
     slice_total_hatch_path_length_mm_ = result.total_hatch_path_length_mm;
     slice_total_path_length_mm_ = result.total_path_length_mm;
+    ComputeSupportSliceStats(slice_layers_);
     slice_current_layer_ = 0;
     slice_visible_ = true;
     slice_contours_visible_ = true;
@@ -2101,6 +2587,10 @@ bool SceneViewport::GenerateSlice(const SliceSettings& settings,
 void SceneViewport::ClearSlicePreview()
 {
     loaded_slice_snapshot_.reset();
+    slice_support_contour_count_ = 0;
+    slice_support_hatch_count_ = 0;
+    slice_support_contour_path_length_mm_ = 0.0;
+    slice_support_hatch_path_length_mm_ = 0.0;
     if (slice_layers_.empty() && !slice_visible_)
         return;
     if (window_ != nullptr && glad_ready_)
@@ -2205,6 +2695,10 @@ SceneViewport::SlicePreviewInfo SceneViewport::SliceInfo() const
     info.total_contour_path_length_mm = slice_total_contour_path_length_mm_;
     info.total_hatch_path_length_mm = slice_total_hatch_path_length_mm_;
     info.total_path_length_mm = slice_total_path_length_mm_;
+    info.support_contour_count = slice_support_contour_count_;
+    info.support_hatch_count = slice_support_hatch_count_;
+    info.support_contour_path_length_mm = slice_support_contour_path_length_mm_;
+    info.support_hatch_path_length_mm = slice_support_hatch_path_length_mm_;
     info.hatch = slice_applied_settings_.hatch;
     if (info.has_preview && slice_current_layer_ < slice_layers_.size())
     {
@@ -2238,6 +2732,7 @@ SliceBuildSnapshot SceneViewport::BuildSliceExportSnapshot() const
         part.triangle_count = entry.info.triangle_count;
         parts.push_back(std::move(part));
     }
+    AppendSupportExportParts(parts);
 
     return BuildSliceBuildSnapshot(
         slice_layers_,
@@ -2281,6 +2776,45 @@ bool SceneViewport::LoadSlicePreview(const SliceBuildSnapshot& snapshot,
         slice_total_hatch_path_length_mm_ += layer.hatch_path_length_mm;
         slice_total_path_length_mm_ += layer.path_length_mm;
     }
+    // The export snapshot marks support parts explicitly; count their geometry
+    // separately while keeping the totals above unchanged.
+    slice_support_contour_count_ = 0;
+    slice_support_hatch_count_ = 0;
+    slice_support_contour_path_length_mm_ = 0.0;
+    slice_support_hatch_path_length_mm_ = 0.0;
+    std::vector<std::uint64_t> support_part_ids;
+    support_part_ids.reserve(snapshot.parts.size());
+    for (const SlicePartInfo& part : snapshot.parts)
+        if (part.kind == SlicePartKind::Support)
+            support_part_ids.push_back(part.id);
+    if (!support_part_ids.empty())
+    {
+        std::sort(support_part_ids.begin(), support_part_ids.end());
+        support_part_ids.erase(std::unique(support_part_ids.begin(),
+            support_part_ids.end()), support_part_ids.end());
+        const auto is_support_part = [&support_part_ids](std::uint64_t id)
+        {
+            return std::binary_search(support_part_ids.begin(),
+                support_part_ids.end(), id);
+        };
+        for (const SliceLayer& layer : slice_layers_)
+        {
+            for (const SlicePath& path : layer.contours)
+                if (is_support_part(path.model_id))
+                {
+                    ++slice_support_contour_count_;
+                    slice_support_contour_path_length_mm_ +=
+                        SlicePathLengthMm(path);
+                }
+            for (const SliceHatchLine& line : layer.hatches)
+                if (is_support_part(line.model_id))
+                {
+                    ++slice_support_hatch_count_;
+                    slice_support_hatch_path_length_mm_ +=
+                        SliceHatchLengthMm(line);
+                }
+        }
+    }
     slice_current_layer_ = 0;
     slice_visible_ = true;
     slice_contours_visible_ = true;
@@ -2321,6 +2855,10 @@ void SceneViewport::UploadSliceLayer()
     const glm::vec3 hatch_color(0.95f, 0.10f, 0.70f);
     const glm::vec3 arrow_color(0.98f, 0.98f, 0.98f);
     const glm::vec3 jump_color(0.15f, 1.0f, 0.35f);
+    // Support slice geometry is drawn in orange so it never blends into the
+    // teal support mesh in the 3D scene (and stays distinct from the cyan model
+    // contours and magenta model hatches).
+    const glm::vec3 support_slice_color(1.00f, 0.55f, 0.10f);
     const float z = static_cast<float>(
         layer.z_mm / BasePlate::kMmPerWorldUnit);
     std::vector<float> vertices;
@@ -2347,12 +2885,20 @@ void SceneViewport::UploadSliceLayer()
     };
 
     for (const SlicePath& path : layer.contours)
+    {
+        const glm::vec3& color = IsSupportSliceModelId(path.model_id)
+            ? support_slice_color : contour_color;
         for (std::size_t i = 1; i < path.points.size(); ++i)
-            add_segment(path.points[i - 1], path.points[i], contour_color);
+            add_segment(path.points[i - 1], path.points[i], color);
+    }
     const int contour_vertices = static_cast<int>(vertices.size() / 6);
 
     for (const SliceHatchLine& line : layer.hatches)
-        add_segment(line.start, line.end, hatch_color);
+    {
+        const glm::vec3& color = IsSupportSliceModelId(line.model_id)
+            ? support_slice_color : hatch_color;
+        add_segment(line.start, line.end, color);
+    }
     const int hatch_vertices =
         static_cast<int>(vertices.size() / 6) - contour_vertices;
 
@@ -2385,12 +2931,14 @@ void SceneViewport::UploadSliceLayer()
     const int arrow_vertices =
         static_cast<int>(vertices.size() / 6) - contour_vertices - hatch_vertices;
 
+    // Travel moves are derived from consecutive scan vectors in slice order.
+    // Hatches are stored model by model in the model-list order, so the pair at
+    // a model boundary is the real jump from the last hatch of one part to the
+    // first hatch of the next part; keep it so jumps between parts show too.
     for (std::size_t i = 1; i < layer.hatches.size(); ++i)
     {
         const SliceHatchLine& previous = layer.hatches[i - 1];
         const SliceHatchLine& next = layer.hatches[i];
-        if (previous.model_id != next.model_id)
-            continue;
         const std::array<double, 2>& start = previous.end;
         const std::array<double, 2>& end = next.start;
         const double dx = end[0] - start[0];
@@ -2453,6 +3001,46 @@ ProjectData SceneViewport::SnapshotProject() const
         project.models.push_back({QString::fromUtf8(info.path.c_str()), entry.stl_data,
             info.local_translation_mm, info.local_scale, info.local_rotation_degrees, info.placement_center_mm, info.name});
     }
+
+    // Supports are persisted after the model list and reference their owner by
+    // the model index, so the order must match ProjectData::models exactly.
+    std::vector<std::pair<std::size_t, const SupportGroup*>> records;
+    records.reserve(support_entries_.size());
+    for (const SupportGroup& group : support_entries_)
+    {
+        if (group.state != SupportState::Generated &&
+            group.state != SupportState::NotNeeded)
+            continue;
+        std::size_t owner_index = models_.size();
+        for (std::size_t i = 0; i < models_.size(); ++i)
+            if (models_[i].info.id == group.owner_model_id)
+            {
+                owner_index = i;
+                break;
+            }
+        if (owner_index == models_.size())
+            continue;
+        records.emplace_back(owner_index, &group);
+    }
+    std::sort(records.begin(), records.end(),
+        [](const auto& a, const auto& b)
+        {
+            if (a.first != b.first)
+                return a.first < b.first;
+            return a.second->id < b.second->id;
+        });
+    project.supports.reserve(records.size());
+    for (const auto& entry : records)
+    {
+        const SupportGroup& group = *entry.second;
+        ProjectSupportRecord record;
+        record.owner_model_index = static_cast<std::uint32_t>(entry.first);
+        record.state = group.state;
+        record.overhang_angle_deg = group.overhang_angle_deg;
+        record.volume_mm3 = group.volume_mm3;
+        record.local_triangles = group.local_triangles;
+        project.supports.push_back(std::move(record));
+    }
     return project;
 }
 
@@ -2501,6 +3089,36 @@ bool SceneViewport::ApplyProject(const ProjectData& project, QString& error)
     ApplyPlateSizeMm(project.plate_size_mm);
     models_ = std::move(replacement);
     next_model_id_ = next_id;
+    // Rebuild the support groups against the freshly loaded models. New ids are
+    // allocated from the support range so stale preview/export ids never match.
+    support_entries_.clear();
+    next_support_id_ = kSupportIdBase;
+    support_entries_.reserve(project.supports.size());
+    for (const ProjectSupportRecord& record : project.supports)
+    {
+        if (record.owner_model_index >= models_.size())
+            continue; // ProjectFile::Validate already rejects this.
+        const ModelEntry& owner = models_[record.owner_model_index];
+        SupportGroup group;
+        group.id = next_support_id_++;
+        group.owner_model_id = owner.info.id;
+        group.name = (owner.info.name + QStringLiteral(" 支撑"))
+            .toUtf8().toStdString();
+        group.state = record.state;
+        group.overhang_angle_deg = record.overhang_angle_deg;
+        group.volume_mm3 = record.volume_mm3;
+        group.local_triangles = record.local_triangles;
+        group.source_transform = owner.model->Transform();
+        group.source_world_center_z_mm =
+            static_cast<double>(owner.info.world_position_mm.z);
+        support_entries_.push_back(std::move(group));
+    }
+    support_mesh_dirty_ = true;
+    ++support_state_revision_;
+    slice_support_contour_count_ = 0;
+    slice_support_hatch_count_ = 0;
+    slice_support_contour_path_length_mm_ = 0.0;
+    slice_support_hatch_path_length_mm_ = 0.0;
     active_model_id_ = 0;
     ChooseActiveModel();
     RefreshSceneBounds();
@@ -2517,6 +3135,9 @@ void SceneViewport::NewProject()
     glfwMakeContextCurrent(window_);
     pending_pick_.reset();
     models_.clear();
+    support_entries_.clear();
+    next_support_id_ = kSupportIdBase;
+    MarkSupportsDocumentChanged();
     ApplyPlateSizeMm(PlateDimensions::DefaultSizeMm());
     active_model_id_ = 0;
     RefreshSceneBounds();
@@ -2564,6 +3185,19 @@ void SceneViewport::ReleaseGraphics()
         glDeleteVertexArrays(1, &slice_vao_);
     slice_vbo_ = 0;
     slice_vao_ = 0;
+    if (support_vbo_ != 0)
+        glDeleteBuffers(1, &support_vbo_);
+    if (support_vao_ != 0)
+        glDeleteVertexArrays(1, &support_vao_);
+    support_vbo_ = 0;
+    support_vao_ = 0;
+    support_vertex_count_ = 0;
+    support_mesh_dirty_ = true;
+    support_entries_.clear();
+    slice_support_contour_count_ = 0;
+    slice_support_hatch_count_ = 0;
+    slice_support_contour_path_length_mm_ = 0.0;
+    slice_support_hatch_path_length_mm_ = 0.0;
     slice_contour_vertex_count_ = 0;
     slice_hatch_vertex_count_ = 0;
     slice_arrow_vertex_count_ = 0;

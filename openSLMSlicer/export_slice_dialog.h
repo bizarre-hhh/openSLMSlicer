@@ -49,6 +49,7 @@ private:
     QLabel* summary_label_ = nullptr;
     QLabel* hint_label_ = nullptr;
     std::size_t part_count_ = 0;
+    std::size_t support_part_count_ = 0;
     std::size_t layer_count_ = 0;
     std::size_t empty_layer_count_ = 0;
     std::size_t contour_count_ = 0;

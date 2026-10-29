@@ -60,6 +60,9 @@ private:
     void PlaceModelsOnPlate();
     void EditPlateSize();
     void GenerateSlice();
+    void GenerateSupports();
+    void DeleteAllSupports();
+    void UpdateSupportActions();
     void ExportSliceFile();
     void OpenSliceFile();
     void ShowSliceFileInfo();
@@ -71,6 +74,7 @@ private:
     void UpdateModelTransformDialog(bool force = false);
     void CreateModelDock();
     void RefreshModelList();
+    void MoveModelToOrder(std::uint64_t id, int order);
     void UpdateModelDetails();
     void UpdateModelTransformDetails();
     void UpdateModelSelection(bool force = false);
@@ -80,6 +84,7 @@ private:
     QString project_path_;
     QString recent_projects_file_;
     std::uint64_t saved_history_revision_ = 0;
+    std::uint64_t saved_support_state_revision_ = 0;
     QAction* undo_action_ = nullptr;
     QAction* redo_action_ = nullptr;
     QAction* duplicate_action_ = nullptr;
@@ -90,6 +95,9 @@ private:
     QAction* export_slice_action_ = nullptr;
     QAction* open_slice_file_action_ = nullptr;
     QAction* slice_file_info_action_ = nullptr;
+    QAction* generate_support_action_ = nullptr;
+    QAction* delete_all_supports_action_ = nullptr;
+    QAction* supports_visible_action_ = nullptr;
     QDialog* transform_dialog_ = nullptr;
     std::array<QDoubleSpinBox*, 3> transform_fields_{};
     std::uint64_t transform_dialog_model_id_ = 0;
@@ -126,6 +134,7 @@ private:
     QLabel* slice_hatch_label_ = nullptr;
     QLabel* slice_jump_label_ = nullptr;
     QLabel* slice_total_label_ = nullptr;
+    QLabel* slice_support_label_ = nullptr;
     QLabel* slice_hatch_settings_label_ = nullptr;
     QCheckBox* slice_visible_check_ = nullptr;
     QCheckBox* slice_contour_visible_check_ = nullptr;
@@ -151,6 +160,7 @@ private:
     bool ready_ = false;
     bool closing_ = false;
     bool exporting_ = false;
+    bool generating_supports_ = false;
 };
 
 #endif

@@ -12,8 +12,9 @@ namespace
 {
 constexpr quint32 kMagic = 0x534C4D50; // SLMP
 constexpr quint32 kLegacyMagic = 0x474C5052; // GLPR from the pre-rename format
-constexpr quint32 kVersion = 5;
+constexpr quint32 kVersion = 6;
 constexpr quint32 kMaxModels = 10000;
+constexpr quint32 kMaxSupportGroups = 10000;
 constexpr quint32 kMaxPathBytes = 1024 * 1024;
 // Qt 5 QByteArray is int-sized. Bound allocations before reading file data.
 constexpr quint32 kMaxModelBytes = 512 * 1024 * 1024;
@@ -64,6 +65,71 @@ bool FiniteVector(const glm::vec3& value)
 {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
 }
+
+bool ValidSupportState(SupportState state)
+{
+    return state == SupportState::Generated || state == SupportState::NotNeeded;
+}
+
+bool FiniteTriangle(const SliceTriangle& triangle)
+{
+    for (const auto& vertex : triangle.vertices)
+        for (double value : vertex)
+            if (!std::isfinite(value))
+                return false;
+    return true;
+}
+
+bool ValidateSupports(const ProjectData& project, QString& error)
+{
+    if (project.supports.size() > kMaxSupportGroups)
+    {
+        error = QStringLiteral("工程中的支撑数量超过上限。");
+        return false;
+    }
+    for (const auto& support : project.supports)
+    {
+        if (support.owner_model_index >= project.models.size())
+        {
+            error = QStringLiteral("工程中的支撑关联到不存在的模型。");
+            return false;
+        }
+        if (!ValidSupportState(support.state))
+        {
+            error = QStringLiteral("工程中的支撑状态无效。");
+            return false;
+        }
+        if (!std::isfinite(support.overhang_angle_deg) ||
+            support.overhang_angle_deg < 0.0 || support.overhang_angle_deg > 89.0 ||
+            !std::isfinite(support.volume_mm3) || support.volume_mm3 < 0.0)
+        {
+            error = QStringLiteral("工程中的支撑参数无效。");
+            return false;
+        }
+        if (support.local_triangles.size() > kMaxSupportTrianglesPerModel)
+        {
+            error = QStringLiteral("工程中的支撑三角面数量超过上限。");
+            return false;
+        }
+        if (support.state == SupportState::Generated && support.local_triangles.empty())
+        {
+            error = QStringLiteral("工程中的支撑几何缺失。");
+            return false;
+        }
+        if (support.state == SupportState::NotNeeded && !support.local_triangles.empty())
+        {
+            error = QStringLiteral("工程中的支撑数据不一致。");
+            return false;
+        }
+        for (const auto& triangle : support.local_triangles)
+            if (!FiniteTriangle(triangle))
+            {
+                error = QStringLiteral("工程中的支撑几何包含非有限坐标。");
+                return false;
+            }
+    }
+    return true;
+}
 } // namespace
 
 QString ProjectFile::Filter()
@@ -107,8 +173,11 @@ bool ProjectFile::Validate(const ProjectData& project, QString& error)
             model.scale.x > 0.0f && model.scale.y > 0.0f && model.scale.z > 0.0f;
     }
     if (!valid)
+    {
         error = QStringLiteral("工程包含无效的模型数据或变换参数。");
-    return valid;
+        return false;
+    }
+    return ValidateSupports(project, error);
 }
 
 bool ProjectFile::Read(const QString& path, ProjectData& project, QString& error)
@@ -189,6 +258,48 @@ bool ProjectFile::Read(const QString& path, ProjectData& project, QString& error
         valid = valid && stream.status() == QDataStream::Ok;
         loaded.models.push_back(std::move(model));
     }
+
+    // Version 6 adds support groups after the model list. Older versions simply
+    // have none, which keeps them fully readable.
+    if (valid && version >= 6)
+    {
+        quint32 support_count = 0;
+        stream >> support_count;
+        valid = stream.status() == QDataStream::Ok && support_count <= kMaxSupportGroups;
+        for (quint32 i = 0; valid && i < support_count; ++i)
+        {
+            ProjectSupportRecord support;
+            quint32 owner_index = 0;
+            quint8 state = 0;
+            float overhang = 0.0f;
+            float volume = 0.0f;
+            quint32 triangle_count = 0;
+            stream >> owner_index >> state >> overhang >> volume >> triangle_count;
+            valid = stream.status() == QDataStream::Ok &&
+                    owner_index < loaded.models.size() && state <= 2 &&
+                    triangle_count <= kMaxSupportTrianglesPerModel;
+            if (!valid)
+                break;
+            support.owner_model_index = owner_index;
+            support.state = static_cast<SupportState>(state);
+            support.overhang_angle_deg = overhang;
+            support.volume_mm3 = volume;
+            support.local_triangles.resize(triangle_count);
+            for (auto& triangle : support.local_triangles)
+            {
+                for (auto& vertex : triangle.vertices)
+                    for (double& value : vertex)
+                    {
+                        float component = 0.0f;
+                        stream >> component;
+                        value = component;
+                    }
+            }
+            valid = valid && stream.status() == QDataStream::Ok;
+            loaded.supports.push_back(std::move(support));
+        }
+    }
+
     if (!valid || stream.status() != QDataStream::Ok || !file.atEnd())
     {
         error = QStringLiteral("工程文件已损坏、数据不完整或超过支持的大小。");
@@ -230,6 +341,19 @@ bool ProjectFile::Write(const QString& path, const ProjectData& project, QString
         stream << model.placement_center_mm.x << model.placement_center_mm.y;
         WriteBytes(stream, (model.name.isEmpty()
             ? ModelNames::Unique(ModelNames::FromPath(model.source_path), names) : model.name).toUtf8());
+    }
+    stream << static_cast<quint32>(project.supports.size());
+    for (const auto& support : project.supports)
+    {
+        stream << static_cast<quint32>(support.owner_model_index)
+               << static_cast<quint8>(support.state)
+               << static_cast<float>(support.overhang_angle_deg)
+               << static_cast<float>(support.volume_mm3)
+               << static_cast<quint32>(support.local_triangles.size());
+        for (const auto& triangle : support.local_triangles)
+            for (const auto& vertex : triangle.vertices)
+                for (double value : vertex)
+                    stream << static_cast<float>(value);
     }
     if (stream.status() != QDataStream::Ok || !file.commit())
     {

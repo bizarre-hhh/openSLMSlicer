@@ -55,15 +55,23 @@ QString BuildSummary(const QString& path, const SliceFileInfo& info)
         .arg(static_cast<qulonglong>(info.contour_count));
     text += QStringLiteral("填充：%1 条\n")
         .arg(static_cast<qulonglong>(info.hatch_count));
-    text += QStringLiteral("Part：%1 个\n")
-        .arg(static_cast<qulonglong>(info.parts.size()));
+    std::size_t support_part_count = 0;
+    for (const SlicePartInfo& part : info.parts)
+        if (part.kind == SlicePartKind::Support)
+            ++support_part_count;
+    text += QStringLiteral("Part：共 %1 个（支撑 %2 个）\n")
+        .arg(static_cast<qulonglong>(info.parts.size()))
+        .arg(static_cast<qulonglong>(support_part_count));
     if (!info.parts.empty())
     {
-        text += QStringLiteral("\nid | 三角面 | 名称 | 来源\n");
+        text += QStringLiteral("\nid | 类型 | 三角面 | 名称 | 来源\n");
         for (const SlicePartInfo& part : info.parts)
         {
-            text += QStringLiteral("%1 | %2 | %3 | %4\n")
+            text += QStringLiteral("%1 | %2 | %3 | %4 | %5\n")
                 .arg(static_cast<qulonglong>(part.id))
+                .arg(part.kind == SlicePartKind::Support
+                         ? QStringLiteral("支撑")
+                         : QStringLiteral("模型"))
                 .arg(static_cast<qulonglong>(part.triangle_count))
                 .arg(part.name.isEmpty() ? QStringLiteral("（未命名）") : part.name)
                 .arg(part.source_path);

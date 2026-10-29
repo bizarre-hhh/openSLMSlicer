@@ -80,6 +80,7 @@ set(PROJECT_SOURCES
   "slice_file_info_dialog.cpp"
   "scene_viewport.cpp"
   "slice_engine.cpp"
+  "support_engine.cpp"
   "slice_export.cpp"
   "slice_report_export.cpp"
   "slmslice_format.cpp"
@@ -233,6 +234,26 @@ if (BUILD_TESTING)
     COMMENT "Copying PySLM runtime files for slicing tests"
   )
   add_test(NAME slicing_engine COMMAND slicing_tests)
+
+  add_executable(support_tests "tests/support_tests.cpp" "support_engine.cpp")
+  target_include_directories(support_tests PRIVATE
+    "${APP_SOURCE_DIR}"
+    "${PYSLM_DIR}/include"
+    "${GLM_DIR}/include"
+  )
+  target_link_libraries(support_tests PRIVATE pyslm_cpp)
+  target_compile_definitions(support_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+  if (MSVC)
+    target_compile_options(support_tests PRIVATE /utf-8)
+  endif()
+  set_target_properties(support_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  add_custom_command(TARGET support_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${PYSLM_RUNTIME_DIR}" "$<TARGET_FILE_DIR:support_tests>"
+    COMMENT "Copying PySLM runtime files for support tests"
+  )
+  add_test(NAME support_engine COMMAND support_tests)
 
   add_executable(slice_export_tests "tests/slice_export_tests.cpp"
     "slice_export.cpp" "slice_report_export.cpp" "slmslice_format.cpp"

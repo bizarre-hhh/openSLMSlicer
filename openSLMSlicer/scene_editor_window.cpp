@@ -366,6 +366,33 @@ SceneEditorWindow::SceneEditorWindow(SceneViewport& viewport, const QString& pro
     connect(slice_file_info_action_, &QAction::triggered,
             this, &SceneEditorWindow::ShowSliceFileInfo);
 
+    QMenu* support_menu = menuBar()->addMenu(QStringLiteral("支撑(&U)"));
+    generate_support_action_ = support_menu->addAction(QStringLiteral("一键生成支撑"));
+    generate_support_action_->setObjectName(QStringLiteral("generateSupportAction"));
+    generate_support_action_->setIcon(QIcon(QStringLiteral(":/icons/support.svg")));
+    generate_support_action_->setIconText(QStringLiteral("生成支撑"));
+    generate_support_action_->setToolTip(
+        QStringLiteral("为所有模型自动生成 45° 悬垂支撑；已有支撑的模型会跳过"));
+    generate_support_action_->setEnabled(false);
+    connect(generate_support_action_, &QAction::triggered,
+            this, &SceneEditorWindow::GenerateSupports);
+    delete_all_supports_action_ = support_menu->addAction(QStringLiteral("删除全部支撑"));
+    delete_all_supports_action_->setObjectName(QStringLiteral("deleteAllSupportsAction"));
+    delete_all_supports_action_->setToolTip(
+        QStringLiteral("删除所有模型上已生成的支撑，不影响模型和切片预览"));
+    delete_all_supports_action_->setEnabled(false);
+    connect(delete_all_supports_action_, &QAction::triggered,
+            this, &SceneEditorWindow::DeleteAllSupports);
+    supports_visible_action_ = support_menu->addAction(QStringLiteral("显示支撑"));
+    supports_visible_action_->setObjectName(QStringLiteral("supportsVisibleAction"));
+    supports_visible_action_->setCheckable(true);
+    supports_visible_action_->setChecked(viewport_.SupportsVisible());
+    supports_visible_action_->setToolTip(
+        QStringLiteral("显示或隐藏已生成的支撑；只影响显示，不修改工程"));
+    supports_visible_action_->setEnabled(false);
+    connect(supports_visible_action_, &QAction::toggled, this,
+            [this](bool checked) { viewport_.SetSupportsVisible(checked); });
+
     QMenu* view_menu = menuBar()->addMenu(QStringLiteral("视图(&V)"));
 
     QAction* reset_action = view_menu->addAction(QStringLiteral("重置视角"));
@@ -417,6 +444,7 @@ SceneEditorWindow::SceneEditorWindow(SceneViewport& viewport, const QString& pro
     toolbar->addSeparator();
     toolbar->addAction(plate_size_action);
     toolbar->addAction(slice_action_);
+    toolbar->addAction(generate_support_action_);
     toolbar->addAction(settings_action);
 
     CreateModelDock();
@@ -429,6 +457,7 @@ SceneEditorWindow::SceneEditorWindow(SceneViewport& viewport, const QString& pro
     statusBar()->showMessage(QStringLiteral(
         "就绪：仅显示基板 | 右键旋转，中键平移，滚轮缩放，Home 重置"));
     saved_history_revision_ = viewport_.HistoryRevision();
+    saved_support_state_revision_ = viewport_.SupportStateRevision();
     UpdateProjectState();
     ready_ = true;
     if (!project_path_.isEmpty())
@@ -446,6 +475,7 @@ void SceneEditorWindow::StartRendering()
     viewport_.ShowNativeWindow();
     viewport_.RenderFrame();
     saved_history_revision_ = viewport_.HistoryRevision();
+    saved_support_state_revision_ = viewport_.SupportStateRevision();
     UpdateProjectState();
     render_timer_.start();
 }
@@ -457,7 +487,8 @@ void SceneEditorWindow::UpdateProjectState()
     const QString title = QStringLiteral("%1[*] - openSLMSlicer").arg(name);
     if (windowTitle() != title)
         setWindowTitle(title);
-    setWindowModified(viewport_.HistoryRevision() != saved_history_revision_);
+    setWindowModified(viewport_.HistoryRevision() != saved_history_revision_ ||
+                      viewport_.SupportStateRevision() != saved_support_state_revision_);
     setWindowFilePath(project_path_);
     UpdateOperationHistory();
     UpdateModelTransformDialog();
@@ -466,6 +497,8 @@ void SceneEditorWindow::UpdateProjectState()
 
 bool SceneEditorWindow::SaveProject(bool save_as)
 {
+    if (generating_supports_)
+        return false;
     RenderPause pause(render_timer_, viewport_);
     UpdateProjectState();
     if (!save_as && !project_path_.isEmpty() && !isWindowModified())
@@ -501,6 +534,7 @@ bool SceneEditorWindow::SaveProject(bool save_as)
     }
     project_path_ = QFileInfo(target).absoluteFilePath();
     saved_history_revision_ = viewport_.HistoryRevision();
+    saved_support_state_revision_ = viewport_.SupportStateRevision();
     UpdateProjectState();
     statusBar()->showMessage(QStringLiteral("已保存工程：%1").arg(QDir::toNativeSeparators(project_path_)));
     return true;
@@ -521,12 +555,15 @@ bool SceneEditorWindow::ConfirmSaveChanges()
 
 void SceneEditorWindow::NewProject()
 {
+    if (generating_supports_)
+        return;
     RenderPause pause(render_timer_, viewport_);
     if (!ConfirmSaveChanges())
         return;
     viewport_.NewProject();
     project_path_.clear();
     saved_history_revision_ = viewport_.HistoryRevision();
+    saved_support_state_revision_ = viewport_.SupportStateRevision();
     RefreshModelList();
     UpdateProjectState();
     statusBar()->showMessage(QStringLiteral("已新建工程，可以导入 STL 模型。"));
@@ -534,6 +571,8 @@ void SceneEditorWindow::NewProject()
 
 void SceneEditorWindow::OpenProject()
 {
+    if (generating_supports_)
+        return;
     RenderPause pause(render_timer_, viewport_);
     // Confirm before the native file dialog: showing a Qt message box directly
     // inside the dialog's closing callback can leave it behind the disabled
@@ -558,6 +597,7 @@ void SceneEditorWindow::OpenProject()
     }
     project_path_ = QFileInfo(path).absoluteFilePath();
     saved_history_revision_ = viewport_.HistoryRevision();
+    saved_support_state_revision_ = viewport_.SupportStateRevision();
     RefreshModelList();
     UpdateProjectState();
     statusBar()->showMessage(QStringLiteral("已打开工程：%1 | %2 个模型")
@@ -567,6 +607,8 @@ void SceneEditorWindow::OpenProject()
 
 void SceneEditorWindow::DuplicateModels()
 {
+    if (generating_supports_)
+        return;
     RenderPause pause(render_timer_, viewport_);
     QString error;
     if (!viewport_.DuplicateSelectedModels(error))
@@ -581,6 +623,8 @@ void SceneEditorWindow::DuplicateModels()
 
 void SceneEditorWindow::PlaceModelsOnPlate()
 {
+    if (generating_supports_)
+        return;
     RenderPause pause(render_timer_, viewport_);
     const auto history = viewport_.HistoryRevision();
     QString error;
@@ -597,6 +641,8 @@ void SceneEditorWindow::PlaceModelsOnPlate()
 
 void SceneEditorWindow::ArrayModels()
 {
+    if (generating_supports_)
+        return;
     RenderPause pause(render_timer_, viewport_);
     if (viewport_.IsTransformEditing()) return;
     std::size_t selected_count = 0;
@@ -708,6 +754,8 @@ void SceneEditorWindow::ArrayModels()
 
 void SceneEditorWindow::EditPlateSize()
 {
+    if (generating_supports_)
+        return;
     RenderPause pause(render_timer_, viewport_);
     const glm::vec3 current = viewport_.PlateSizeMm();
     QDialog dialog(this);
@@ -783,6 +831,13 @@ void SceneEditorWindow::RememberCurrentProject()
 
 void SceneEditorWindow::closeEvent(QCloseEvent* event)
 {
+    // Support generation runs a nested event loop; closing mid-generation would
+    // destroy the viewport the generator is writing to.
+    if (generating_supports_)
+    {
+        event->ignore();
+        return;
+    }
     closing_ = true;
     RenderPause pause(render_timer_, viewport_);
     if (!ConfirmSaveChanges())
@@ -797,6 +852,8 @@ void SceneEditorWindow::closeEvent(QCloseEvent* event)
 
 void SceneEditorWindow::UndoOperation()
 {
+    if (generating_supports_)
+        return;
     RenderPause pause(render_timer_, viewport_);
     QString error;
     if (!viewport_.Undo(error))
@@ -812,6 +869,8 @@ void SceneEditorWindow::UndoOperation()
 
 void SceneEditorWindow::RedoOperation()
 {
+    if (generating_supports_)
+        return;
     RenderPause pause(render_timer_, viewport_);
     QString error;
     if (!viewport_.Redo(error))
@@ -879,6 +938,8 @@ void SceneEditorWindow::UpdateOperationHistory()
 
 void SceneEditorWindow::EditModelTransform(TransformMode mode)
 {
+    if (generating_supports_)
+        return;
     viewport_.ReleaseCursor();
     const auto* info = viewport_.CurrentModelInfo();
     if (!info || !info->selected) return;
@@ -1041,10 +1102,12 @@ void SceneEditorWindow::CreateModelDock()
 
     model_list_ = new QListWidget(contents);
     model_list_->setObjectName(QStringLiteral("stlModelList"));
-    model_list_->setMinimumHeight(100);
+    model_list_->setMinimumHeight(160);
     model_list_->setSelectionMode(QAbstractItemView::NoSelection);
     model_list_->setFocusPolicy(Qt::NoFocus);
-    model_list_->setToolTip(QStringLiteral("双击模型名称或列表行可修改名称"));
+    model_list_->setToolTip(QStringLiteral(
+        "双击模型名称或列表行可修改名称\n"
+        "首列序号定义切片顺序，修改后模型会移动到该位置（可撤销/回撤）"));
     connect(model_list_, &QListWidget::itemDoubleClicked, this,
         [this](QListWidgetItem* item) { RenameModel(item->data(Qt::UserRole).toULongLong()); });
 
@@ -1186,18 +1249,28 @@ void SceneEditorWindow::CreateModelDock()
     details_scroll->setObjectName(QStringLiteral("modelDetailsScroll"));
     details_scroll->setWidgetResizable(true);
     details_scroll->setFrameShape(QFrame::NoFrame);
-    details_scroll->setMinimumHeight(180);
     details_scroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     details_scroll->setWidget(model_details_);
+    // Reserve the height the basic-information content needs on a tall
+    // (maximized) window so its vertical scrollbar never shows; the model list
+    // takes the remaining height. A too-short window can still fall back to
+    // scrolling instead of clipping the details.
+    model_details_->ensurePolished();
+    const int details_height =
+        std::max(180, model_details_->sizeHint().height() + 8);
+    details_scroll->setMinimumHeight(180);
     QSplitter* splitter = new QSplitter(Qt::Vertical, contents);
     splitter->setObjectName(QStringLiteral("modelDockSplitter"));
     splitter->setChildrenCollapsible(false);
     splitter->setHandleWidth(6);
     splitter->addWidget(model_list_);
     splitter->addWidget(details_scroll);
-    splitter->setStretchFactor(0, 0);
-    splitter->setStretchFactor(1, 1);
-    splitter->setSizes({170, 480});
+    // The model list takes the extra vertical space, so taller windows show a
+    // longer list while the details panel keeps its content height. The
+    // splitter can still be dragged to change the ratio at any time.
+    splitter->setStretchFactor(0, 1);
+    splitter->setStretchFactor(1, 0);
+    splitter->setSizes({240, details_height});
     layout->addWidget(splitter, 1);
 
     model_dock_->setWidget(contents);
@@ -1277,6 +1350,14 @@ void SceneEditorWindow::CreateSliceDock()
     slice_total_label_->setTextFormat(Qt::PlainText);
     layout->addWidget(slice_total_label_);
 
+    slice_support_label_ = new QLabel(QStringLiteral("其中支撑：无"), contents);
+    slice_support_label_->setObjectName(QStringLiteral("sliceSupportLabel"));
+    slice_support_label_->setWordWrap(true);
+    slice_support_label_->setTextFormat(Qt::PlainText);
+    slice_support_label_->setToolTip(
+        QStringLiteral("切片统计中的支撑部分（轮廓/填充条数与路径长度）"));
+    layout->addWidget(slice_support_label_);
+
     slice_hatch_settings_label_ = new QLabel(QString(), contents);
     slice_hatch_settings_label_->setObjectName(
         QStringLiteral("sliceHatchSettingsLabel"));
@@ -1323,7 +1404,7 @@ void SceneEditorWindow::CreateSliceDock()
     slice_jump_visible_check_->setChecked(false);
     slice_jump_visible_check_->setEnabled(false);
     slice_jump_visible_check_->setToolTip(
-        QStringLiteral("显示同一模型内相邻填充线之间的跳转"));
+        QStringLiteral("显示相邻填充线之间的跳转（同一零件内及零件之间）"));
     layout->addWidget(slice_jump_visible_check_);
 
     slice_hide_models_check_ =
@@ -1424,6 +1505,9 @@ void SceneEditorWindow::UpdateSlicePanel(bool force)
     if (!slice_action_ || !clear_slice_action_ || !slice_dock_)
         return;
 
+    // Runs on the per-frame UI refresh path; cheap enough to poll every frame.
+    UpdateSupportActions();
+
     const bool can_slice = viewport_.ModelCount() > 0 &&
                            !viewport_.IsTransformEditing();
     slice_action_->setEnabled(can_slice);
@@ -1463,6 +1547,7 @@ void SceneEditorWindow::UpdateSlicePanel(bool force)
         slice_hatch_label_->clear();
         slice_jump_label_->clear();
         slice_total_label_->clear();
+        slice_support_label_->setText(QStringLiteral("其中支撑：无"));
         slice_hatch_settings_label_->clear();
         const QSignalBlocker slider_blocker(slice_slider_);
         const QSignalBlocker spin_blocker(slice_layer_spin_);
@@ -1544,6 +1629,21 @@ void SceneEditorWindow::UpdateSlicePanel(bool force)
             .arg(QLocale().toString(info.total_contour_path_length_mm, 'f', 2))
             .arg(QLocale().toString(info.total_hatch_path_length_mm, 'f', 2))
             .arg(QLocale().toString(info.total_path_length_mm, 'f', 2)));
+    const double support_path_length_mm =
+        info.support_contour_path_length_mm + info.support_hatch_path_length_mm;
+    if (info.support_contour_count == 0 && info.support_hatch_count == 0 &&
+        !(support_path_length_mm > 0.0))
+    {
+        slice_support_label_->setText(QStringLiteral("其中支撑：无"));
+    }
+    else
+    {
+        slice_support_label_->setText(
+            QStringLiteral("其中支撑：轮廓 %1 条 / 填充 %2 条 / 路径 %3 mm")
+                .arg(static_cast<qulonglong>(info.support_contour_count))
+                .arg(static_cast<qulonglong>(info.support_hatch_count))
+                .arg(QLocale().toString(support_path_length_mm, 'f', 2)));
+    }
 
     const int layer_count = static_cast<int>(info.layer_count);
     const int layer_index = static_cast<int>(info.layer_index);
@@ -1587,6 +1687,8 @@ void SceneEditorWindow::UpdateSlicePanel(bool force)
 
 void SceneEditorWindow::GenerateSlice()
 {
+    if (generating_supports_)
+        return;
     if (viewport_.ModelCount() == 0)
     {
         QMessageBox::information(this, QStringLiteral("生成切片"),
@@ -1817,9 +1919,161 @@ void SceneEditorWindow::GenerateSlice()
             issues.join(QStringLiteral("\n")));
 }
 
+void SceneEditorWindow::GenerateSupports()
+{
+    if (generating_supports_ || exporting_ || closing_)
+        return;
+    if (viewport_.ModelCount() == 0)
+    {
+        QMessageBox::information(this, QStringLiteral("一键生成支撑"),
+            QStringLiteral("请先导入至少一个 STL 模型。"));
+        return;
+    }
+    if (viewport_.IsTransformEditing())
+    {
+        QMessageBox::information(this, QStringLiteral("一键生成支撑"),
+            QStringLiteral("请先关闭模型变换参数窗口。"));
+        return;
+    }
+
+    RenderPause pause(render_timer_, viewport_);
+    const std::size_t model_count = viewport_.ModelCount();
+
+    SceneViewport::SupportGenerateSummary summary;
+    bool cancelled = false;
+    QStringList issues;
+    QString error;
+    bool ok = false;
+    {
+        // Released before the UI refresh below so the action states reflect the
+        // finished generation instead of the busy guard.
+        ScopedFlag generating_supports(generating_supports_);
+
+        QProgressDialog progress(QStringLiteral("正在生成支撑，请稍候…"),
+                                 QStringLiteral("取消"), 0,
+                                 static_cast<int>(std::min<std::size_t>(
+                                     model_count,
+                                     static_cast<std::size_t>(std::numeric_limits<int>::max()))),
+                                 this);
+        progress.setObjectName(QStringLiteral("generateSupportsProgressDialog"));
+        progress.setWindowTitle(QStringLiteral("一键生成支撑"));
+        progress.setWindowModality(Qt::WindowModal);
+        progress.setMinimumDuration(0);
+        progress.setAutoClose(false);
+        progress.setAutoReset(false);
+        progress.setValue(0);
+        progress.show();
+        QCoreApplication::processEvents();
+
+        auto progress_callback = [&progress](std::size_t completed,
+                                             std::size_t total) -> bool
+        {
+            if (progress.wasCanceled())
+                return false;
+            if (total > 0)
+            {
+                const int maximum = static_cast<int>(
+                    std::min<std::size_t>(
+                        total, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+                if (progress.maximum() != maximum)
+                    progress.setMaximum(maximum);
+                progress.setValue(static_cast<int>(
+                    std::min<std::size_t>(completed,
+                        static_cast<std::size_t>(maximum))));
+            }
+            QCoreApplication::processEvents();
+            return !progress.wasCanceled();
+        };
+
+        ok = viewport_.GenerateSupportsForAll(
+            progress_callback, summary, cancelled, issues, error);
+        progress.close();
+    }
+
+    // Refresh the action states, the slice panel and the modified flag even
+    // when the caller does not pump another render frame.
+    UpdateSupportActions();
+    UpdateSlicePanel(true);
+    UpdateProjectState();
+
+    if (cancelled)
+    {
+        statusBar()->showMessage(QStringLiteral("已取消生成支撑。"));
+        return;
+    }
+    if (!ok)
+    {
+        QStringList details;
+        details.append(error.isEmpty()
+            ? QStringLiteral("未能生成任何支撑。") : error);
+        for (const QString& issue : issues)
+            details.append(issue);
+        QMessageBox::warning(this, QStringLiteral("无法生成支撑"),
+            details.join(QStringLiteral("\n")));
+        return;
+    }
+
+    QString message =
+        QStringLiteral("支撑生成完成：新增 %1 个模型（其中无需支撑 %2），跳过 %3，失败 %4")
+            .arg(static_cast<qulonglong>(summary.generated))
+            .arg(static_cast<qulonglong>(summary.not_needed))
+            .arg(static_cast<qulonglong>(summary.skipped))
+            .arg(static_cast<qulonglong>(summary.failed));
+    // A stale slice preview is cleared by the viewport's normal invalidation
+    // path on the next render frame; its status message replaces this one.
+    statusBar()->showMessage(message);
+    if (!issues.isEmpty())
+        QMessageBox::warning(this, QStringLiteral("部分模型未生成支撑"),
+            issues.join(QStringLiteral("\n")));
+}
+
+void SceneEditorWindow::DeleteAllSupports()
+{
+    if (generating_supports_ || exporting_ || closing_)
+        return;
+    if (viewport_.SupportEntryCount() == 0)
+    {
+        statusBar()->showMessage(QStringLiteral("当前没有可删除的支撑。"));
+        return;
+    }
+    const auto answer = QMessageBox::question(this, QStringLiteral("删除全部支撑"),
+        QStringLiteral("将删除全部支撑（共 %1 个模型），是否继续？")
+            .arg(static_cast<qulonglong>(viewport_.SupportEntryCount())),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+        return;
+
+    RenderPause pause(render_timer_, viewport_);
+    viewport_.DeleteAllSupports();
+    UpdateSupportActions();
+    UpdateSlicePanel(true);
+    UpdateProjectState();
+    // A stale slice preview is cleared by the viewport's normal invalidation
+    // path on the next render frame; its status message replaces this one.
+    statusBar()->showMessage(QStringLiteral("已删除全部支撑。"));
+}
+
+void SceneEditorWindow::UpdateSupportActions()
+{
+    if (!generate_support_action_ || !delete_all_supports_action_ ||
+        !supports_visible_action_)
+    {
+        return;
+    }
+    const bool busy = generating_supports_ || exporting_ || closing_;
+    generate_support_action_->setEnabled(
+        !busy && viewport_.ModelCount() > 0 && !viewport_.IsTransformEditing());
+    delete_all_supports_action_->setEnabled(
+        !busy && viewport_.SupportEntryCount() > 0);
+    supports_visible_action_->setEnabled(
+        !busy && viewport_.HasGeneratedSupports());
+    const QSignalBlocker blocker(supports_visible_action_);
+    supports_visible_action_->setChecked(viewport_.SupportsVisible());
+}
+
 void SceneEditorWindow::ExportSliceFile()
 {
-    if (exporting_ || closing_)
+    if (exporting_ || generating_supports_ || closing_)
         return;
     if (!viewport_.SliceInfo().has_preview)
     {
@@ -1948,7 +2202,7 @@ void SceneEditorWindow::ExportSliceFile()
 
 void SceneEditorWindow::OpenSliceFile()
 {
-    if (exporting_ || closing_)
+    if (exporting_ || generating_supports_ || closing_)
         return;
 
     RenderPause pause(render_timer_, viewport_);
@@ -1998,6 +2252,8 @@ void SceneEditorWindow::OpenSliceFile()
 
 void SceneEditorWindow::ShowSliceFileInfo()
 {
+    if (generating_supports_ || closing_)
+        return;
     RenderPause pause(render_timer_, viewport_);
     QString directory = SliceExportLastDirectory();
     if (!loaded_slice_path_.isEmpty())
@@ -2029,6 +2285,8 @@ void SceneEditorWindow::ShowSliceFileInfo()
 
 void SceneEditorWindow::ClearSlicePreview()
 {
+    if (generating_supports_)
+        return;
     if (!viewport_.SliceInfo().has_preview)
         return;
     RenderPause pause(render_timer_, viewport_);
@@ -2048,8 +2306,10 @@ void SceneEditorWindow::RefreshModelList()
         const QSignalBlocker blocker(model_list_);
         model_items_.clear();
         model_list_->clear();
-        for (const auto& info : viewport_.ModelInfos())
+        const auto infos = viewport_.ModelInfos();
+        for (std::size_t index = 0; index < infos.size(); ++index)
         {
+            const auto& info = infos[index];
             const auto id = info.id;
             const QString path = QString::fromUtf8(info.path.c_str());
             QListWidgetItem* item = new QListWidgetItem(
@@ -2068,6 +2328,28 @@ void SceneEditorWindow::RefreshModelList()
             QHBoxLayout* row_layout = new QHBoxLayout(row);
             row_layout->setContentsMargins(4, 2, 4, 2);
             row_layout->setSpacing(4);
+            // First column: the 1-based model order. Editing it moves the model
+            // to that position; the last committed order defines slice order.
+            QSpinBox* order_spin = new QSpinBox(row);
+            order_spin->setObjectName(QStringLiteral("modelOrderSpin"));
+            order_spin->setRange(1, static_cast<int>(infos.size()));
+            order_spin->setValue(static_cast<int>(index) + 1);
+            order_spin->setAlignment(Qt::AlignCenter);
+            order_spin->setFixedWidth(64);
+            order_spin->setKeyboardTracking(false);
+            order_spin->setToolTip(QStringLiteral(
+                "模型序号（切片顺序）：修改后模型会移动到该位置，切片按列表顺序生成；可撤销/回撤"));
+            row_layout->addWidget(order_spin);
+            connect(order_spin, QOverload<int>::of(&QSpinBox::valueChanged), this,
+                [this, id](int value)
+                {
+                    // Applying the move rebuilds this row, so defer until the
+                    // spin box has finished emitting.
+                    QTimer::singleShot(0, this, [this, id, value]()
+                    {
+                        MoveModelToOrder(id, value);
+                    });
+                });
             QLabel* name_label = new QLabel(info.name, row);
             name_label->setObjectName(QStringLiteral("modelRowName"));
             name_label->setTextFormat(Qt::PlainText);
@@ -2160,6 +2442,27 @@ void SceneEditorWindow::RefreshModelList()
     UpdateModelSelection(true);
 }
 
+void SceneEditorWindow::MoveModelToOrder(std::uint64_t id, int order)
+{
+    if (generating_supports_)
+        return;
+    if (order < 1 || order > static_cast<int>(viewport_.ModelCount()))
+        return;
+    const auto* info = viewport_.ModelInfo(id);
+    if (!info)
+        return;
+    const QString name = info->name;
+    const auto history = viewport_.HistoryRevision();
+    if (!viewport_.MoveModelToIndex(id, static_cast<std::size_t>(order - 1)) ||
+        viewport_.HistoryRevision() == history)
+        return;
+    RefreshModelList();
+    UpdateProjectState();
+    statusBar()->showMessage(
+        QStringLiteral("模型顺序：%1 → 第 %2 位 | 切片按列表顺序生成")
+            .arg(name).arg(order));
+}
+
 void SceneEditorWindow::UpdateModelSelection(bool force)
 {
     const auto* current = viewport_.CurrentModelInfo();
@@ -2179,9 +2482,17 @@ void SceneEditorWindow::UpdateModelSelection(bool force)
     }
 
     const auto infos = viewport_.ModelInfos();
-    if (infos.size() != model_items_.size() ||
-        std::any_of(infos.begin(), infos.end(), [this](const auto& info)
-        { return model_items_.find(info.id) == model_items_.end(); }))
+    // Rebuild the widget rows whenever the model set or its order changed, so
+    // Undo/Redo and external reorders keep the list (and its order column) in
+    // sync with the viewport.
+    bool needs_rebuild = infos.size() != model_items_.size();
+    for (std::size_t index = 0; !needs_rebuild && index < infos.size(); ++index)
+    {
+        const QListWidgetItem* item = model_list_->item(static_cast<int>(index));
+        needs_rebuild = item == nullptr ||
+            item->data(Qt::UserRole).toULongLong() != infos[index].id;
+    }
+    if (needs_rebuild)
     {
         RefreshModelList();
         return;
@@ -2313,6 +2624,8 @@ bool SceneEditorWindow::eventFilter(QObject* object, QEvent* event)
 
 void SceneEditorWindow::RenameModel(std::uint64_t id)
 {
+    if (generating_supports_)
+        return;
     const auto* info = viewport_.ModelInfo(id);
     if (!info) return;
     const QString initial_name = info->name;
@@ -2367,6 +2680,8 @@ void SceneEditorWindow::RenameModel(std::uint64_t id)
 
 void SceneEditorWindow::OpenStl()
 {
+    if (generating_supports_)
+        return;
     render_timer_.stop();
     viewport_.ReleaseCursor();
     const QString initial_directory =

@@ -20,6 +20,9 @@ struct SliceModelInput
     std::uint64_t id = 0;
     std::string name;
     std::vector<SliceTriangle> triangles;
+    // True for automatically generated support parts. The slice engine output is
+    // identical; the flag lets preview/export code treat supports separately.
+    bool is_support = false;
 };
 
 enum class SliceRingRole

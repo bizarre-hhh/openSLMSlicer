@@ -17,6 +17,7 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QStringList>
+#include <QVariant>
 #include <QVBoxLayout>
 
 #include <cmath>
@@ -81,6 +82,9 @@ ExportSliceDialog::ExportSliceDialog(const SliceBuildSnapshot& snapshot,
     setMinimumWidth(560);
 
     part_count_ = snapshot.parts.size();
+    for (const SlicePartInfo& part : snapshot.parts)
+        if (part.kind == SlicePartKind::Support)
+            ++support_part_count_;
     layer_thickness_mm_ = snapshot.settings.layer_thickness_mm;
     for (const SliceLayer& layer : snapshot.layers)
     {
@@ -371,8 +375,12 @@ void ExportSliceDialog::UpdateSummary()
         include_empty_layers_check_->isChecked();
     const std::size_t written_layers = keep_empty ? layer_count_ : valid_layers;
 
+    const std::size_t support_part_count = support_part_count_;
+    const std::size_t model_part_count =
+        part_count_ >= support_part_count ? part_count_ - support_part_count : 0;
+
     QString text = QStringLiteral("模型 part：%1 个 | 层厚：%2")
-        .arg(NumberText(part_count_), ThicknessText(layer_thickness_mm_));
+        .arg(NumberText(model_part_count), ThicknessText(layer_thickness_mm_));
     text += QStringLiteral("\n切片层：%1 层（有效 %2 层，空层 %3 层）")
         .arg(NumberText(layer_count_))
         .arg(NumberText(valid_layers))
@@ -381,6 +389,8 @@ void ExportSliceDialog::UpdateSummary()
         .arg(NumberText(written_layers))
         .arg(NumberText(contour_count_))
         .arg(NumberText(hatch_count_));
+    text += QStringLiteral("\n支撑对象：%1 个（几何已计入轮廓/填充统计）")
+        .arg(NumberText(support_part_count));
     if (format == SliceExportFormat::Svg || format == SliceExportFormat::Png)
     {
         text += QStringLiteral("\n联系人表：%1 个单元格（每个非空层一格）")

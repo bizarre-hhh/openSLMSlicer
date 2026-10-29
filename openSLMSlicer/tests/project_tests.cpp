@@ -12,6 +12,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QSet>
 #include <QSettings>
@@ -34,10 +35,12 @@
 #include <QWidget>
 
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 #include <glad/glad.h>
 #define GLFW_INCLUDE_NONE
@@ -82,12 +85,38 @@ bool SameModel(const ProjectModel& a, const ProjectModel& b)
         a.rotation_degrees == b.rotation_degrees && a.placement_center_mm == b.placement_center_mm && a.name == b.name;
 }
 
+bool SameFloat(double a, double b)
+{
+    const double scale = std::max(1.0, std::max(std::abs(a), std::abs(b)));
+    return std::abs(a - b) <= 1.0e-4 * scale;
+}
+
+bool SameSupportRecord(const ProjectSupportRecord& a, const ProjectSupportRecord& b)
+{
+    if (a.owner_model_index != b.owner_model_index || a.state != b.state ||
+        !SameFloat(a.overhang_angle_deg, b.overhang_angle_deg) ||
+        !SameFloat(a.volume_mm3, b.volume_mm3) ||
+        a.local_triangles.size() != b.local_triangles.size())
+        return false;
+    for (std::size_t i = 0; i < a.local_triangles.size(); ++i)
+        for (int corner = 0; corner < 3; ++corner)
+            for (int axis = 0; axis < 3; ++axis)
+                if (!SameFloat(a.local_triangles[i].vertices[corner][axis],
+                               b.local_triangles[i].vertices[corner][axis]))
+                    return false;
+    return true;
+}
+
 bool SameProject(const ProjectData& a, const ProjectData& b)
 {
-    if (a.models.size() != b.models.size() || a.plate_size_mm != b.plate_size_mm)
+    if (a.models.size() != b.models.size() || a.plate_size_mm != b.plate_size_mm ||
+        a.supports.size() != b.supports.size())
         return false;
     for (std::size_t i = 0; i < a.models.size(); ++i)
         if (!SameModel(a.models[i], b.models[i]))
+            return false;
+    for (std::size_t i = 0; i < a.supports.size(); ++i)
+        if (!SameSupportRecord(a.supports[i], b.supports[i]))
             return false;
     return true;
 }
@@ -258,14 +287,14 @@ void FileTests(const QString& directory)
         Require(SameProject(original, restored), "saved document differs");
         Require(restored.models[0].stl_data == stl, "embedded STL changed");
     });
-    Run("version 5 adds platform height and independent UTF-8 names", [&]()
+    Run("version 6 adds platform height and independent UTF-8 names", [&]()
     {
         const QByteArray bytes = ReadBytes(file);
         const QByteArray version3 = LegacyProject(original, 3);
         int name_bytes = 0;
         for (const auto& model : original.models) name_bytes += 4 + model.name.toUtf8().size();
-        Require(static_cast<unsigned char>(bytes[4]) == 5, "new format version missing");
-        Require(bytes.size() - version3.size() == 4 + name_bytes,
+        Require(static_cast<unsigned char>(bytes[4]) == 6, "new format version missing");
+        Require(bytes.size() - version3.size() == 8 + name_bytes,
                 "unexpected serialized fields");
     });
     Run("version 3 preserves placement and derives distinct names for repeated paths", [&]()
@@ -298,6 +327,67 @@ void FileTests(const QString& directory)
         Require(ProjectFile::Read(path, restored, error), qPrintable(error));
         Require(SameProject(sized, restored), "platform or placement lost in roundtrip");
     });
+    Run("version 6 persists support groups, owner mapping and state", [&]()
+    {
+        ProjectData with_supports = original;
+        SliceTriangle triangle{};
+        triangle.vertices[0] = {1.25, 2.5, 0.0};
+        triangle.vertices[1] = {11.25, 2.5, 0.0};
+        triangle.vertices[2] = {1.25, 12.5, 0.0};
+        ProjectSupportRecord generated;
+        generated.owner_model_index = 1;
+        generated.state = SupportState::Generated;
+        generated.overhang_angle_deg = 45.0;
+        generated.volume_mm3 = 1234.5;
+        generated.local_triangles = {triangle, triangle};
+        ProjectSupportRecord not_needed;
+        not_needed.owner_model_index = 0;
+        not_needed.state = SupportState::NotNeeded;
+        with_supports.supports = {generated, not_needed};
+        const QString path = directory + "/with_supports.slmproj";
+        Require(ProjectFile::Write(path, with_supports, error), qPrintable(error));
+        const QByteArray bytes = ReadBytes(path);
+        Require(static_cast<unsigned char>(bytes[4]) == 6, "support project version");
+        ProjectData restored;
+        Require(ProjectFile::Read(path, restored, error), qPrintable(error));
+        Require(SameProject(with_supports, restored), "support groups lost in roundtrip");
+        Require(restored.supports[0].state == SupportState::Generated &&
+                restored.supports[1].state == SupportState::NotNeeded, "support state lost");
+    });
+    Run("support validation rejects owner, state and finite-coordinate errors", [&]()
+    {
+        ProjectData base = original;
+        SliceTriangle triangle{};
+        triangle.vertices[0] = {1.0, 2.0, 0.0};
+        triangle.vertices[1] = {5.0, 2.0, 0.0};
+        triangle.vertices[2] = {1.0, 6.0, 0.0};
+        ProjectSupportRecord support;
+        support.owner_model_index = 0;
+        support.state = SupportState::Generated;
+        support.local_triangles = {triangle};
+        base.supports = {support};
+        ProjectData invalid = base;
+        invalid.supports[0].owner_model_index = 99;
+        Require(!ProjectFile::Write(directory + "/bad_support.slmproj", invalid, error),
+                "support owner out of range accepted");
+        invalid = base;
+        invalid.supports[0].state = SupportState::None;
+        Require(!ProjectFile::Write(directory + "/bad_support.slmproj", invalid, error),
+                "empty support state accepted");
+        invalid = base;
+        invalid.supports[0].local_triangles[0].vertices[0][2] =
+            std::numeric_limits<double>::quiet_NaN();
+        Require(!ProjectFile::Write(directory + "/bad_support.slmproj", invalid, error),
+                "non-finite support coordinate accepted");
+        invalid = base;
+        invalid.supports[0].state = SupportState::NotNeeded;
+        Require(!ProjectFile::Write(directory + "/bad_support.slmproj", invalid, error),
+                "not-needed support with geometry accepted");
+        invalid = base;
+        invalid.supports[0].local_triangles.clear();
+        Require(!ProjectFile::Write(directory + "/bad_support.slmproj", invalid, error),
+                "generated support without geometry accepted");
+    });
     Run("legacy version 1 preserves geometry and ignores presentation", [&]()
     {
         const QString legacy = directory + "/legacy.slmproj";
@@ -325,7 +415,7 @@ void FileTests(const QString& directory)
             Require(SameProject(previous, original), "failed read replaced document");
         }
         QByteArray invalid = bytes;
-        invalid[4] = 6; // Unsupported format version.
+        invalid[4] = 7; // Unsupported format version.
         WriteBytes(directory + "/bad.slmproj", invalid);
         ProjectData previous = original;
         Require(!ProjectFile::Read(directory + "/bad.slmproj", previous, error), "newer version accepted");
@@ -1243,6 +1333,99 @@ void NamingTests(const QString& directory)
         load(source);
         unique_names();
     });
+    Run("automatic supports persist, follow X/Y moves and invalidate on Z/rotation", [&]()
+    {
+        viewport.NewProject();
+        std::string load_error;
+        glm::vec3 size_mm;
+        Require(viewport.LoadStl(std::string(TEST_ASSET_DIR "/cube_30mm.stl"),
+                                 load_error, size_mm), load_error.c_str());
+        Require(viewport.ModelCount() == 1, "support fixture model missing");
+        const auto id = viewport.ModelInfos()[0].id;
+        const glm::vec3 tilt(0.0f, 30.0f, 0.0f);
+        Require(viewport.TransformModelTo(id, {{0, 0, 0}, {1, 1, 1}, tilt},
+                                          TransformMode::Rotate), "tilt support fixture");
+        SceneViewport::SupportGenerateSummary summary;
+        bool cancelled = false;
+        QStringList issues;
+        QString support_error;
+        const auto progress = [](std::size_t, std::size_t) { return true; };
+        Require(viewport.GenerateSupportsForAll(progress, summary, cancelled, issues,
+                                                support_error), qPrintable(support_error));
+        Require(!cancelled && summary.considered == 1 && summary.generated == 1 &&
+                summary.not_needed == 0 && issues.isEmpty(), "support generation summary");
+        Require(viewport.HasGeneratedSupports() && viewport.SupportEntryCount() == 1,
+                "generated supports missing");
+        const auto statuses = viewport.SupportStatuses();
+        Require(statuses.size() == 1 && statuses[0].state == SupportState::Generated &&
+                statuses[0].triangle_count > 0 && statuses[0].volume_mm3 > 0.0,
+                "support entry state/geometry");
+        Require(viewport.RenderFrame(), "render frame with support geometry");
+        viewport.SetSupportsVisible(false);
+        Require(viewport.RenderFrame(), "render frame with hidden supports");
+        viewport.SetSupportsVisible(true);
+        const ProjectData saved = viewport.SnapshotProject();
+        Require(saved.supports.size() == 1 &&
+                saved.supports[0].state == SupportState::Generated &&
+                !saved.supports[0].local_triangles.empty(), "support not persisted");
+        // Real generated geometry must survive the project file roundtrip.
+        const QString support_file = directory + "/generated-supports.slmproj";
+        ProjectData read_back;
+        Require(ProjectFile::Write(support_file, saved, error) &&
+                ProjectFile::Read(support_file, read_back, error), qPrintable(error));
+        Require(SameProject(saved, read_back), "generated supports changed in the project file");
+        // A pure world X/Y translation is stored along the rotated local axes;
+        // the world center Z stays constant, so the supports must follow.
+        const glm::mat3 rotation(ModelTransformMath::Rotation(tilt));
+        const glm::vec3 local_xy =
+            glm::inverse(rotation) * glm::vec3(10.0f, -5.0f, 0.0f);
+        Require(viewport.TransformModelTo(id, {local_xy, {1, 1, 1}, tilt},
+                                          TransformMode::Translate), "translate support owner");
+        Require(viewport.SupportEntryCount() == 1 && viewport.HasGeneratedSupports(),
+                "X/Y translation deleted supports");
+        // Supports slice as independent parts and are counted separately.
+        SliceSettings slice_settings;
+        slice_settings.layer_thickness_mm = 0.1;
+        slice_settings.hatch.enabled = false;
+        bool slice_cancelled = false;
+        QString slice_error;
+        QStringList slice_issues;
+        const auto slice_progress = [](std::size_t, std::size_t) { return true; };
+        Require(viewport.GenerateSlice(slice_settings, slice_progress, slice_cancelled,
+                                       slice_error, slice_issues), qPrintable(slice_error));
+        Require(viewport.SliceInfo().support_contour_count > 0,
+                "support geometry missing from slice preview");
+        const SliceBuildSnapshot export_snapshot = viewport.BuildSliceExportSnapshot();
+        const bool has_support_part = std::any_of(
+            export_snapshot.parts.begin(), export_snapshot.parts.end(),
+            [](const SlicePartInfo& part)
+            {
+                return part.kind == SlicePartKind::Support &&
+                       part.id == kSupportIdBase;
+            });
+        Require(has_support_part, "support part missing from the export snapshot");
+        viewport.ClearSlicePreview();
+        // Rotating the owner invalidates the supports.
+        Require(viewport.TransformModelTo(id, {{0, 0, 0}, {1, 1, 1}, {0, 45, 0}},
+                                          TransformMode::Rotate), "rotate support owner");
+        Require(!viewport.HasGeneratedSupports() && viewport.SupportEntryCount() == 0,
+                "rotation did not delete supports");
+        // Project roundtrip restores supports; a world Z move then invalidates them.
+        Require(viewport.ApplyProject(read_back, error), qPrintable(error));
+        Require(viewport.RenderFrame(), "render frame after support project reload");
+        Require(viewport.HasGeneratedSupports() && viewport.SupportEntryCount() == 1,
+                "project roundtrip lost supports");
+        const auto reloaded = viewport.ModelInfos()[0];
+        const glm::mat3 reloaded_rotation(ModelTransformMath::Rotation(
+            reloaded.local_rotation_degrees));
+        const glm::vec3 local_z =
+            glm::inverse(reloaded_rotation) * glm::vec3(0.0f, 0.0f, 2.0f);
+        Require(viewport.TransformModelTo(reloaded.id,
+                    {local_z, reloaded.local_scale, reloaded.local_rotation_degrees},
+                    TransformMode::Translate), "raise support owner");
+        Require(!viewport.HasGeneratedSupports() && viewport.SupportEntryCount() == 0,
+                "world Z movement did not delete supports");
+    });
 }
 
 void HistoryTests(const QString& directory)
@@ -1932,6 +2115,136 @@ void UiTests(const QString& directory)
                 !window.findChild<QAction*>("redoAction")->isEnabled(), "empty history controls not disabled");
     });
 
+    Run("model order column defines slice order and supports Undo/Redo", [&]()
+    {
+        for (int i = 0; i < 3; ++i)
+            WithFile(model, [&]() { Trigger(window, "openStlAction"); });
+        auto* list = window.findChild<QListWidget*>(QStringLiteral("stlModelList"));
+        Require(list && list->count() == 3 && viewport.ModelCount() == 3,
+                "order fixture models");
+        std::vector<std::uint64_t> ids;
+        for (int i = 0; i < list->count(); ++i)
+            ids.push_back(list->item(i)->data(Qt::UserRole).toULongLong());
+
+        const auto row = [&](int index) { return list->itemWidget(list->item(index)); };
+        const auto order_spin = [&](int index)
+        {
+            return row(index)->findChild<QSpinBox*>(QStringLiteral("modelOrderSpin"));
+        };
+        for (int i = 0; i < 3; ++i)
+        {
+            auto* spin = order_spin(i);
+            Require(spin && spin->value() == i + 1, "order column value");
+            Require(row(i)->layout()->itemAt(0)->widget() == spin,
+                    "order column is not the first column");
+        }
+
+        const auto verify_order = [&](const std::vector<std::uint64_t>& expected)
+        {
+            const auto infos = viewport.ModelInfos();
+            Require(infos.size() == expected.size(), "model order size");
+            for (std::size_t i = 0; i < expected.size(); ++i)
+                Require(infos[i].id == expected[i], "viewport model order");
+            auto* current_list = window.findChild<QListWidget*>(QStringLiteral("stlModelList"));
+            Require(current_list->count() == static_cast<int>(expected.size()),
+                    "model order list count");
+            for (int i = 0; i < current_list->count(); ++i)
+            {
+                Require(current_list->item(i)->data(Qt::UserRole).toULongLong() ==
+                            expected[static_cast<std::size_t>(i)],
+                        "model order list");
+                auto* spin = current_list->itemWidget(current_list->item(i))
+                                 ->findChild<QSpinBox*>(QStringLiteral("modelOrderSpin"));
+                Require(spin && spin->value() == i + 1, "order numbers did not renumber");
+            }
+        };
+
+        const auto history = viewport.HistoryRevision();
+        order_spin(0)->setValue(3);
+        for (int i = 0; i < 100 && viewport.HistoryRevision() == history; ++i)
+            QCoreApplication::processEvents();
+        Require(viewport.HistoryRevision() == history + 1, "order change was not recorded");
+        Require(viewport.OperationHistory().back().contains(QStringLiteral("调整模型顺序")),
+                "order operation description");
+        const std::vector<std::uint64_t> reordered{ids[1], ids[2], ids[0]};
+        verify_order(reordered);
+
+        // The project file stores the model order; reopening restores it.
+        const QString order_project = directory + QStringLiteral("/模型顺序.slmproj");
+        Require(ProjectFile::Write(order_project, viewport.SnapshotProject(), error),
+                qPrintable(error));
+        ProjectData reloaded;
+        Require(ProjectFile::Read(order_project, reloaded, error), qPrintable(error));
+        for (std::size_t i = 0; i < reordered.size(); ++i)
+            Require(reloaded.models[static_cast<int>(i)].name ==
+                        viewport.ModelInfo(reordered[i])->name,
+                    "project did not preserve model order");
+
+        Trigger(window, "undoAction");
+        verify_order({ids[0], ids[1], ids[2]});
+        Trigger(window, "redoAction");
+        verify_order(reordered);
+
+        // Slice geometry is appended per model, so the layer arrays follow the
+        // list order: the first model's contours/hatches come before the rest.
+        // Spread the three parts so the travel legs between them have length.
+        for (std::size_t index = 0; index < reordered.size(); ++index)
+        {
+            const float x = static_cast<float>(index) * 20.0f - 20.0f;
+            Require(viewport.BeginModelMove(reordered[index]), "begin jump fixture move");
+            Require(viewport.MoveModelTo(reordered[index], glm::vec3(x, 0.0f, 0.0f)),
+                    "move jump fixture");
+            viewport.EndModelMove();
+        }
+        SliceSettings settings;
+        settings.layer_thickness_mm = 5.0;
+        settings.hatch.enabled = true;
+        settings.hatch.spacing_mm = 0.5;
+        bool cancelled = false;
+        QStringList issues;
+        Require(viewport.GenerateSlice(settings, {}, cancelled, error, issues),
+                qPrintable(error));
+        const auto slice = viewport.BuildSliceExportSnapshot();
+        Require(!slice.layers.empty(), "order slice layers");
+        const SliceLayer* layer = nullptr;
+        for (const auto& candidate : slice.layers)
+            if (!candidate.empty)
+            {
+                layer = &candidate;
+                break;
+            }
+        Require(layer && !layer->contours.empty() && !layer->hatches.empty(),
+                "order slice geometry");
+        Require(layer->contours.front().model_id == reordered.front() &&
+                    layer->contours.back().model_id == reordered.back(),
+                "contour order does not follow model order");
+        Require(layer->hatches.front().model_id == reordered.front() &&
+                    layer->hatches.back().model_id == reordered.back(),
+                "hatch order does not follow model order");
+
+        // Jumps must also connect the last hatch of one part to the first hatch
+        // of the next part: every adjacent pair contributes one jump, including
+        // the two model boundaries of this fixture.
+        std::size_t model_boundaries = 0;
+        for (std::size_t i = 1; i < layer->hatches.size(); ++i)
+            if (layer->hatches[i - 1].model_id != layer->hatches[i].model_id)
+                ++model_boundaries;
+        const auto jump_info = viewport.SliceInfo();
+        Require(model_boundaries == reordered.size() - 1,
+                "jump fixture model boundaries");
+        Require(jump_info.hatch_count == layer->hatches.size() &&
+                    jump_info.jump_count == jump_info.hatch_count - 1,
+                "jumps between different models are missing");
+
+        viewport.ClearSlicePreview();
+        WithAnswer(QMessageBox::Discard, [&]() { Trigger(window, "newProjectAction"); });
+        Require(viewport.ModelCount() == 0, "order fixture cleanup");
+        // Row widgets are replaced with deferred deletion; flush them before the
+        // following tests count buttons in the window.
+        for (int i = 0; i < 10; ++i)
+            QCoreApplication::processEvents();
+    });
+
     Run("model transform buttons open reusable nonmodal XYZ parameter windows", [&]()
     {
         WithFile(model, [&]() { Trigger(window, "openStlAction"); });
@@ -2227,6 +2540,42 @@ void UiTests(const QString& directory)
         row(0)->findChild<QToolButton*>("selectModelButton")->click();
         Trigger(window, "duplicateModelsAction");
         Require(label(2)->text() == QStringLiteral("隐藏打印件 (2)"), "UI copy shares source name");
+    });
+    Run("support actions generate, skip existing models and delete all", [&]()
+    {
+        viewport.EndTransformEditing();
+        viewport.NewProject();
+        WithFile(model, [&]() { Trigger(window, "openStlAction"); });
+        Require(viewport.ModelCount() == 1, "support UI fixture missing");
+        auto* generate_action = window.findChild<QAction*>("generateSupportAction");
+        auto* delete_action = window.findChild<QAction*>("deleteAllSupportsAction");
+        auto* visible_action = window.findChild<QAction*>("supportsVisibleAction");
+        auto* toolbar = window.findChild<QToolBar*>("mainToolBar");
+        Require(generate_action && delete_action && visible_action && toolbar &&
+                toolbar->actions().contains(generate_action),
+                "support actions/toolbar entry missing");
+        Require(generate_action->isEnabled() && !delete_action->isEnabled() &&
+                !visible_action->isEnabled(), "support action initial states");
+        const auto history = viewport.HistoryRevision();
+        Trigger(window, "generateSupportAction");
+        Require(viewport.SupportEntryCount() == 1 && viewport.HistoryRevision() == history,
+                "one-click support generation did not record a support entry");
+        Require(window.isWindowModified(), "support generation did not mark the document dirty");
+        Require(delete_action->isEnabled(), "delete action not refreshed after generation");
+        Require(window.statusBar()->currentMessage().contains(QStringLiteral("支撑生成完成")),
+                "support generation summary missing");
+        Trigger(window, "generateSupportAction");
+        Require(viewport.SupportEntryCount() == 1 &&
+                window.statusBar()->currentMessage().contains(QStringLiteral("跳过 1")),
+                "existing support entry was not skipped");
+        Require(viewport.SnapshotProject().supports.size() == 1 &&
+                viewport.SnapshotProject().supports[0].state == SupportState::NotNeeded,
+                "support entry missing from the project snapshot");
+        WithAnswer(QMessageBox::Yes, [&]() { Trigger(window, "deleteAllSupportsAction"); });
+        Require(viewport.SupportEntryCount() == 0 && !delete_action->isEnabled(),
+                "delete-all supports failed");
+        Require(viewport.SnapshotProject().supports.empty(),
+                "deleted supports still present in the project snapshot");
     });
     Run("slice menu generates a contour and fill preview without dirtying the project", [&]()
     {
