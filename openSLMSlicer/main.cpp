@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QIcon>
 #include <QMessageBox>
 
 #include "scene_editor_window.h"
@@ -10,6 +11,8 @@ int main(int argc, char* argv[])
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("openSLMSlicer"));
     app.setApplicationVersion(QStringLiteral("0.1.0"));
+    // 品牌 logo：作为所有窗口（标题栏、任务栏、对话框）的默认图标。
+    app.setWindowIcon(QIcon(QStringLiteral(":/logo/slm_logo.png")));
     WelcomeDialog welcome;
     while (welcome.exec() == QDialog::Accepted)
     {

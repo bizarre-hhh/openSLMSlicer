@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/logo">
+    <file>slm_logo.png</file>
+  </qresource>
+</RCC>

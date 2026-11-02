@@ -28,6 +28,8 @@
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QListWidget>
+#include <QTreeWidget>
+#include <unordered_set>
 #include <QLocale>
 #include <QMenu>
 #include <QMenuBar>
@@ -455,7 +457,7 @@ SceneEditorWindow::SceneEditorWindow(SceneViewport& viewport, const QString& pro
     view_menu->addAction(toolbar->toggleViewAction());
 
     statusBar()->showMessage(QStringLiteral(
-        "就绪：仅显示基板 | 右键旋转，中键平移，滚轮缩放，Home 重置"));
+        "就绪：仅显示基板 | 左键选择（Ctrl+左键多选），右键旋转，中键平移，滚轮缩放，Home 重置"));
     saved_history_revision_ = viewport_.HistoryRevision();
     saved_support_state_revision_ = viewport_.SupportStateRevision();
     UpdateProjectState();
@@ -623,7 +625,9 @@ void SceneEditorWindow::DuplicateModels()
 
 void SceneEditorWindow::PlaceModelsOnPlate()
 {
-    if (generating_supports_)
+    // The action is disabled without a selection and while supports exist;
+    // keep the same guard for programmatic triggers.
+    if (generating_supports_ || !viewport_.CanPlaceSelectedModelsOnPlate())
         return;
     RenderPause pause(render_timer_, viewport_);
     const auto history = viewport_.HistoryRevision();
@@ -1100,16 +1104,30 @@ void SceneEditorWindow::CreateModelDock()
     empty_models_label_->setWordWrap(true);
     layout->addWidget(empty_models_label_);
 
-    model_list_ = new QListWidget(contents);
+    // A tree keeps supports as real child rows of their owner model: each model
+    // can be collapsed/expanded and a model with several support regions shows
+    // one indented child row per support.
+    model_list_ = new QTreeWidget(contents);
     model_list_->setObjectName(QStringLiteral("stlModelList"));
     model_list_->setMinimumHeight(160);
+    model_list_->setHeaderHidden(true);
+    model_list_->setRootIsDecorated(true);
+    model_list_->setIndentation(22);
+    model_list_->setUniformRowHeights(false);
+    model_list_->setAnimated(true);
+    model_list_->setExpandsOnDoubleClick(false);
     model_list_->setSelectionMode(QAbstractItemView::NoSelection);
     model_list_->setFocusPolicy(Qt::NoFocus);
     model_list_->setToolTip(QStringLiteral(
         "双击模型名称或列表行可修改名称\n"
-        "首列序号定义切片顺序，修改后模型会移动到该位置（可撤销/回撤）"));
-    connect(model_list_, &QListWidget::itemDoubleClicked, this,
-        [this](QListWidgetItem* item) { RenameModel(item->data(Qt::UserRole).toULongLong()); });
+        "首列序号定义切片顺序，修改后模型会移动到该位置（可撤销/回撤）\n"
+        "展开模型可看到其生成的支撑，每个支撑可单独显示/隐藏"));
+    connect(model_list_, &QTreeWidget::itemDoubleClicked, this,
+        [this](QTreeWidgetItem* item)
+        {
+            if (item && item->parent() == nullptr)
+                RenameModel(item->data(0, Qt::UserRole).toULongLong());
+        });
 
     model_details_ = new QGroupBox(QStringLiteral("基本信息"), contents);
     QFormLayout* details_layout = new QFormLayout(model_details_);
@@ -1993,6 +2011,8 @@ void SceneEditorWindow::GenerateSupports()
     // Refresh the action states, the slice panel and the modified flag even
     // when the caller does not pump another render frame.
     UpdateSupportActions();
+    // Rebuild the model rows so newly generated supports appear as nested lines.
+    RefreshModelList();
     UpdateSlicePanel(true);
     UpdateProjectState();
 
@@ -2037,7 +2057,7 @@ void SceneEditorWindow::DeleteAllSupports()
         return;
     }
     const auto answer = QMessageBox::question(this, QStringLiteral("删除全部支撑"),
-        QStringLiteral("将删除全部支撑（共 %1 个模型），是否继续？")
+        QStringLiteral("将删除全部支撑（共 %1 个，含“无需支撑”标记），是否继续？")
             .arg(static_cast<qulonglong>(viewport_.SupportEntryCount())),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     if (answer != QMessageBox::Yes)
@@ -2046,6 +2066,7 @@ void SceneEditorWindow::DeleteAllSupports()
     RenderPause pause(render_timer_, viewport_);
     viewport_.DeleteAllSupports();
     UpdateSupportActions();
+    RefreshModelList();
     UpdateSlicePanel(true);
     UpdateProjectState();
     // A stale slice preview is cleared by the viewport's normal invalidation
@@ -2069,6 +2090,15 @@ void SceneEditorWindow::UpdateSupportActions()
         !busy && viewport_.HasGeneratedSupports());
     const QSignalBlocker blocker(supports_visible_action_);
     supports_visible_action_->setChecked(viewport_.SupportsVisible());
+    // Grounding the selection is unavailable while generated supports exist.
+    UpdatePlaceOnPlateAction();
+}
+
+void SceneEditorWindow::UpdatePlaceOnPlateAction()
+{
+    if (!place_on_plate_action_)
+        return;
+    place_on_plate_action_->setEnabled(viewport_.CanPlaceSelectedModelsOnPlate());
 }
 
 void SceneEditorWindow::ExportSliceFile()
@@ -2304,23 +2334,32 @@ void SceneEditorWindow::RefreshModelList()
 {
     {
         const QSignalBlocker blocker(model_list_);
+        // Keep models the user collapsed collapsed across rebuilds; models that
+        // gain their first support are expanded (collapsed_models only records
+        // models that already had children).
+        std::unordered_set<std::uint64_t> collapsed_models;
+        for (const auto& entry : model_items_)
+            if (entry.second->childCount() > 0 && !entry.second->isExpanded())
+                collapsed_models.insert(entry.first);
         model_items_.clear();
         model_list_->clear();
         const auto infos = viewport_.ModelInfos();
+        const auto support_statuses = viewport_.SupportStatuses();
         for (std::size_t index = 0; index < infos.size(); ++index)
         {
             const auto& info = infos[index];
             const auto id = info.id;
             const QString path = QString::fromUtf8(info.path.c_str());
-            QListWidgetItem* item = new QListWidgetItem(
-                style()->standardIcon(QStyle::SP_FileIcon),
-                info.name, model_list_);
+            QTreeWidgetItem* item = new QTreeWidgetItem(model_list_);
+            item->setText(0, info.name);
+            item->setIcon(0, style()->standardIcon(QStyle::SP_FileIcon));
             item->setFlags(item->flags() & ~Qt::ItemIsSelectable);
-            item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(id));
-            item->setToolTip(QDir::toNativeSeparators(path));
+            item->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+            item->setToolTip(0, QDir::toNativeSeparators(path));
             model_items_.emplace(id, item);
 
             QWidget* row = new QWidget(model_list_);
+            row->setObjectName(QStringLiteral("modelRow"));
             row->setProperty("modelId", QVariant::fromValue<qulonglong>(id));
             row->installEventFilter(this);
             row->setAutoFillBackground(true);
@@ -2354,7 +2393,7 @@ void SceneEditorWindow::RefreshModelList()
             name_label->setObjectName(QStringLiteral("modelRowName"));
             name_label->setTextFormat(Qt::PlainText);
             name_label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-            name_label->setToolTip(QStringLiteral("双击修改模型名称\n%1").arg(item->toolTip()));
+            name_label->setToolTip(QStringLiteral("双击修改模型名称\n%1").arg(item->toolTip(0)));
             name_label->setProperty("modelId", QVariant::fromValue<qulonglong>(id));
             name_label->installEventFilter(this);
             name_label->setCursor(Qt::PointingHandCursor);
@@ -2432,13 +2471,94 @@ void SceneEditorWindow::RefreshModelList()
                     .arg(name).arg(static_cast<qulonglong>(viewport_.ModelCount())));
             });
 
-            item->setSizeHint(row->sizeHint());
-            model_list_->setItemWidget(item, row);
+            model_list_->setItemWidget(item, 0, row);
+            item->setSizeHint(0, row->sizeHint());
+
+            // Supports are real tree children of their owner model: each
+            // generated support block gets one indented child row so a model
+            // with several support regions shows several rows, and expanding /
+            // collapsing the model hides or shows all of its supports.
+            int support_number = 0;
+            for (const auto& support : support_statuses)
+            {
+                if (support.owner_model_id != id ||
+                    support.state != SupportState::Generated)
+                    continue;
+                ++support_number;
+                QTreeWidgetItem* support_item = new QTreeWidgetItem(item);
+                support_item->setText(0, QStringLiteral("支撑 %1").arg(support_number));
+                support_item->setFlags(support_item->flags() & ~Qt::ItemIsSelectable);
+                support_item->setData(0, Qt::UserRole,
+                    QVariant::fromValue<qulonglong>(support.support_id));
+                support_item->setToolTip(0,
+                    QStringLiteral("自动生成支撑 %1 | 三角面 %2 | 体积 %3 mm³")
+                        .arg(support_number)
+                        .arg(static_cast<qulonglong>(support.triangle_count))
+                        .arg(QLocale().toString(support.volume_mm3, 'f', 2)));
+
+                QWidget* support_row = new QWidget(model_list_);
+                support_row->setObjectName(QStringLiteral("supportRow"));
+                support_row->setProperty("supportId",
+                    QVariant::fromValue<qulonglong>(support.support_id));
+                QHBoxLayout* support_layout = new QHBoxLayout(support_row);
+                support_layout->setContentsMargins(4, 2, 4, 2);
+                support_layout->setSpacing(6);
+                QLabel* support_name = new QLabel(
+                    QStringLiteral("支撑 %1").arg(support_number), support_row);
+                support_name->setObjectName(QStringLiteral("supportRowName"));
+                support_name->setTextFormat(Qt::PlainText);
+                support_name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+                QPalette name_palette = support_name->palette();
+                name_palette.setColor(QPalette::WindowText,
+                    model_list_->palette().color(
+                        support.visible ? QPalette::Active : QPalette::Disabled,
+                        QPalette::Text));
+                support_name->setPalette(name_palette);
+                support_layout->addWidget(support_name, 1);
+                QToolButton* toggle = new QToolButton(support_row);
+                toggle->setObjectName(QStringLiteral("toggleSupportVisibilityButton"));
+                toggle->setProperty("supportId",
+                    QVariant::fromValue<qulonglong>(support.support_id));
+                toggle->setText(support.visible ? QStringLiteral("隐藏")
+                                                : QStringLiteral("显示"));
+                toggle->setMinimumWidth(toggle->sizeHint().width());
+                toggle->setFocusPolicy(Qt::NoFocus);
+                toggle->setToolTip(support.visible ? QStringLiteral("隐藏该支撑的显示")
+                                                   : QStringLiteral("显示该支撑"));
+                support_layout->addWidget(toggle);
+                connect(toggle, &QToolButton::clicked, this,
+                    [this, support_id = support.support_id, support_name, toggle]()
+                    {
+                        // Display-only, like model visibility: slicing/export are
+                        // not affected and the document is not dirtied.
+                        const bool visible = !viewport_.SupportVisible(support_id);
+                        if (!viewport_.SetSupportVisible(support_id, visible))
+                            return;
+                        toggle->setText(visible ? QStringLiteral("隐藏")
+                                                : QStringLiteral("显示"));
+                        toggle->setToolTip(visible ? QStringLiteral("隐藏该支撑的显示")
+                                                   : QStringLiteral("显示该支撑"));
+                        QPalette palette = support_name->palette();
+                        palette.setColor(QPalette::WindowText,
+                            model_list_->palette().color(
+                                visible ? QPalette::Active : QPalette::Disabled,
+                                QPalette::Text));
+                        support_name->setPalette(palette);
+                        statusBar()->showMessage(
+                            (visible ? QStringLiteral("已显示 ")
+                                     : QStringLiteral("已隐藏 ")) +
+                            support_name->text());
+                    });
+                model_list_->setItemWidget(support_item, 0, support_row);
+                support_item->setSizeHint(0, support_row->sizeHint());
+            }
+            if (support_number > 0)
+                item->setExpanded(collapsed_models.count(id) == 0);
         }
     }
     model_count_label_->setText(
-        QStringLiteral("已加载模型（%1）").arg(model_list_->count()));
-    empty_models_label_->setVisible(model_list_->count() == 0);
+        QStringLiteral("已加载模型（%1）").arg(model_list_->topLevelItemCount()));
+    empty_models_label_->setVisible(model_list_->topLevelItemCount() == 0);
     UpdateModelSelection(true);
 }
 
@@ -2470,9 +2590,17 @@ void SceneEditorWindow::UpdateModelSelection(bool force)
     const bool can_duplicate = details_id != 0 && !viewport_.IsTransformEditing();
     duplicate_action_->setEnabled(can_duplicate);
     array_action_->setEnabled(can_duplicate);
-    place_on_plate_action_->setEnabled(can_duplicate);
+    UpdatePlaceOnPlateAction();
     const auto transform_revision = current && current->selected ? current->transform_revision : 0;
     const auto state_revision = viewport_.ModelStateRevision();
+    const auto support_state_revision = viewport_.SupportStateRevision();
+    // Support generation/deletion/load changes the nested support lines only.
+    // Rebuild the model rows without touching the model state tracking.
+    if (!force && support_state_revision != last_support_state_revision_)
+    {
+        RefreshModelList();
+        return;
+    }
     if (!force && state_revision == last_model_state_revision_)
     {
         if (details_id && transform_revision != last_transform_revision_)
@@ -2485,12 +2613,13 @@ void SceneEditorWindow::UpdateModelSelection(bool force)
     // Rebuild the widget rows whenever the model set or its order changed, so
     // Undo/Redo and external reorders keep the list (and its order column) in
     // sync with the viewport.
-    bool needs_rebuild = infos.size() != model_items_.size();
+    bool needs_rebuild = infos.size() != model_items_.size() ||
+        model_list_->topLevelItemCount() != static_cast<int>(infos.size());
     for (std::size_t index = 0; !needs_rebuild && index < infos.size(); ++index)
     {
-        const QListWidgetItem* item = model_list_->item(static_cast<int>(index));
+        const QTreeWidgetItem* item = model_list_->topLevelItem(static_cast<int>(index));
         needs_rebuild = item == nullptr ||
-            item->data(Qt::UserRole).toULongLong() != infos[index].id;
+            item->data(0, Qt::UserRole).toULongLong() != infos[index].id;
     }
     if (needs_rebuild)
     {
@@ -2500,10 +2629,10 @@ void SceneEditorWindow::UpdateModelSelection(bool force)
     const QSignalBlocker blocker(model_list_);
     for (const auto& info : infos)
     {
-        QListWidgetItem* item = model_items_.at(info.id);
+        QTreeWidgetItem* item = model_items_.at(info.id);
         if (info.id == details_id)
             model_list_->scrollToItem(item);
-        QWidget* row = model_list_->itemWidget(item);
+        QWidget* row = model_list_->itemWidget(item, 0);
         auto* selection = row->findChild<QToolButton*>(QStringLiteral("selectModelButton"));
         selection->setText(info.selected ? QStringLiteral("取消选中") : QStringLiteral("选中"));
         selection->setEnabled(!viewport_.IsTransformEditing());
@@ -2517,7 +2646,7 @@ void SceneEditorWindow::UpdateModelSelection(bool force)
         bounds->setText(info.bounding_box_visible ? QStringLiteral("隐藏包围盒") : QStringLiteral("显示包围盒"));
         bounds->setToolTip(info.bounding_box_visible ? QStringLiteral("隐藏模型包围盒") : QStringLiteral("显示模型包围盒"));
         bounds->setChecked(info.bounding_box_visible);
-        item->setText(info.name);
+        item->setText(0, info.name);
         auto* name_label = row->findChild<QLabel*>(QStringLiteral("modelRowName"));
         name_label->setText(info.name);
         QPalette name_palette = name_label->palette();
@@ -2535,8 +2664,9 @@ void SceneEditorWindow::UpdateModelSelection(bool force)
         UpdateModelTransformDetails();
     if (details_id != last_details_model_id_)
         statusBar()->showMessage(details_id ? QStringLiteral("已选中 %1").arg(
-            model_items_.at(details_id)->text()) : QStringLiteral("已取消模型选择"));
+            model_items_.at(details_id)->text(0)) : QStringLiteral("已取消模型选择"));
     last_model_state_revision_ = state_revision;
+    last_support_state_revision_ = support_state_revision;
     last_details_model_id_ = details_id;
     last_transform_revision_ = transform_revision;
 }

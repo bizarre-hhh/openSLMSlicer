@@ -12,8 +12,10 @@
 
 // Automatic support generation shared types.
 //
-// A support group is derived from one STL model and always belongs to that
-// model. The generated triangles are stored in local build coordinates:
+// A support group is one solid support block derived from one STL model. A
+// model may own several groups (one per detected support region); the viewport
+// keeps them as separate parts so the model list can show and hide each one.
+// The generated triangles are stored in local build coordinates:
 //   X/Y are relative to the owner model's world XY center at generation time,
 //   Z is the absolute build-plate height in millimeters.
 // The viewport resolves local triangles to world coordinates with the owner's
@@ -54,6 +56,9 @@ struct SupportGroup
     // World bbox-center Z of the owner at generation time. A change means the
     // model moved vertically and its supports are no longer valid.
     double source_world_center_z_mm = 0.0;
+    // Per-support display visibility (runtime only, like model visibility). A
+    // hidden support is still sliced and exported; it is only not drawn.
+    bool visible = true;
 };
 
 using SupportProgressCallback = std::function<bool(std::size_t completed, std::size_t total)>;

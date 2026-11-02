@@ -3,6 +3,7 @@
 #include <pyslm/types.hpp>
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -79,6 +80,31 @@ bool AllCoordinatesFinite(const std::vector<SliceTriangle>& triangles)
                 if (!std::isfinite(value))
                     return false;
     return true;
+}
+
+std::vector<SliceTriangle> CombineBlocks(const SupportGenerationOutput& output)
+{
+    std::vector<SliceTriangle> combined;
+    for (const SupportGenerationBlock& block : output.blocks)
+        combined.insert(combined.end(), block.local_triangles.begin(),
+                        block.local_triangles.end());
+    return combined;
+}
+
+double TotalVolume(const SupportGenerationOutput& output)
+{
+    double volume = 0.0;
+    for (const SupportGenerationBlock& block : output.blocks)
+        volume += block.volume_mm3;
+    return volume;
+}
+
+std::size_t TotalTriangles(const SupportGenerationOutput& output)
+{
+    std::size_t count = 0;
+    for (const SupportGenerationBlock& block : output.blocks)
+        count += block.triangle_count;
+    return count;
 }
 
 struct MeshBounds
@@ -215,20 +241,18 @@ void CheckEmptyModelNeedsNoSupport()
     input.name = "empty";
     SupportGenerationOutput output;
     output.state = SupportState::Generated; // must be reset by the engine
-    output.triangle_count = 7;
+    output.blocks.push_back({});            // must be reset by the engine
     std::string error = "stale error";
 
     const bool ok = GenerateSupportForModel(input, output, error);
     Require(ok, "empty model generation should succeed, got: " + error);
     Require(output.state == SupportState::NotNeeded,
             "empty model should report NotNeeded");
-    Require(output.local_triangles.empty(),
-            "empty model should not produce support triangles");
-    Require(output.triangle_count == 0, "empty model triangle count should be 0");
-    Require(output.volume_mm3 == 0.0, "empty model volume should be 0");
+    Require(output.blocks.empty(),
+            "empty model should not produce support blocks");
     Require(error.empty(), "successful generation should clear the error: " + error);
 
-    std::cout << "empty model: NotNeeded, no triangles\n";
+    std::cout << "empty model: NotNeeded, no blocks\n";
 }
 
 void CheckHoveringPlateGeneratesSupports()
@@ -252,23 +276,31 @@ void CheckHoveringPlateGeneratesSupports()
         return;
     }
 
-    const MeshBounds bounds = ComputeBounds(output.local_triangles);
+    const std::vector<SliceTriangle> local = CombineBlocks(output);
+    const MeshBounds bounds = ComputeBounds(local);
+    const double volume = TotalVolume(output);
+    const std::size_t triangles = TotalTriangles(output);
     std::cout << "hovering plate: state="
               << (output.state == SupportState::Generated ? "Generated" : "other")
-              << ", triangles=" << output.triangle_count
-              << ", volume_mm3=" << Format(output.volume_mm3)
+              << ", blocks=" << output.blocks.size()
+              << ", triangles=" << triangles
+              << ", volume_mm3=" << Format(volume)
               << ", bounds=" << DescribeBounds(bounds) << '\n';
 
     Require(output.state == SupportState::Generated,
             "hovering plate should generate supports, got state " +
                 std::to_string(static_cast<int>(output.state)));
-    Require(!output.local_triangles.empty(),
+    Require(output.blocks.size() == 1,
+            "one hovering plate should produce exactly one support block, got " +
+                std::to_string(output.blocks.size()));
+    Require(!local.empty(),
             "hovering plate support triangles must not be empty");
-    Require(output.triangle_count == output.local_triangles.size(),
-            "triangle_count does not match local_triangles size");
-    Require(AllCoordinatesFinite(output.local_triangles),
+    for (const SupportGenerationBlock& block : output.blocks)
+        Require(block.triangle_count == block.local_triangles.size(),
+                "block triangle_count does not match local_triangles size");
+    Require(AllCoordinatesFinite(local),
             "hovering plate support contains non-finite coordinates");
-    Require(output.volume_mm3 > 0.0,
+    Require(volume > 0.0,
             "hovering plate support volume must be positive");
     Require(bounds.valid && bounds.min[2] >= -0.5,
             "support mesh reaches below the build plate: min z " +
@@ -276,12 +308,12 @@ void CheckHoveringPlateGeneratesSupports()
     Require(bounds.valid && bounds.max[2] <= 21.0,
             "support mesh rises above the overhang face: max z " +
                 Format(bounds.max[2]));
-    Require(std::abs(output.volume_mm3 - 28791.99) <= 0.10 * 28791.99,
-            "hovering plate support volume " + Format(output.volume_mm3) +
+    Require(std::abs(volume - 28791.99) <= 0.10 * 28791.99,
+            "hovering plate support volume " + Format(volume) +
                 " deviates more than 10% from the PoC value 28791.99");
-    Require(output.triangle_count >= 100,
+    Require(triangles >= 100,
             "hovering plate support triangle count " +
-                std::to_string(output.triangle_count) + " is unexpectedly small");
+                std::to_string(triangles) + " is unexpectedly small");
     Require(bounds.valid && bounds.min[0] >= -25.0 && bounds.max[0] <= 25.0 &&
                 bounds.min[1] >= -25.0 && bounds.max[1] <= 25.0,
             "support footprint is not under the 40x40 plate: " +
@@ -313,13 +345,11 @@ void CheckOnPlateModelNeedsNoSupport()
     std::cout << "on-plate cube: state="
               << (output.state == SupportState::NotNeeded ? "NotNeeded"
                                                           : "other")
-              << ", triangles=" << output.triangle_count << '\n';
+              << ", blocks=" << output.blocks.size() << '\n';
     Require(output.state == SupportState::NotNeeded,
             "cube resting on the build plate should report NotNeeded");
-    Require(output.local_triangles.empty(),
+    Require(output.blocks.empty(),
             "cube resting on the build plate should not need supports");
-    Require(output.volume_mm3 == 0.0,
-            "cube resting on the build plate should have zero support volume");
 }
 
 void CheckLocalCoordinatesFollowModelCenter()
@@ -344,18 +374,22 @@ void CheckLocalCoordinatesFollowModelCenter()
         return;
     }
 
-    const MeshBounds bounds = ComputeBounds(output.local_triangles);
+    const std::vector<SliceTriangle> local = CombineBlocks(output);
+    const MeshBounds bounds = ComputeBounds(local);
+    const double volume = TotalVolume(output);
+    const std::size_t triangles = TotalTriangles(output);
     std::cout << "offset hovering plate: state="
               << (output.state == SupportState::Generated ? "Generated" : "other")
-              << ", triangles=" << output.triangle_count
-              << ", volume_mm3=" << Format(output.volume_mm3)
+              << ", blocks=" << output.blocks.size()
+              << ", triangles=" << triangles
+              << ", volume_mm3=" << Format(volume)
               << ", local bounds=" << DescribeBounds(bounds) << '\n';
 
     Require(output.state == SupportState::Generated,
             "offset hovering plate should generate supports");
-    Require(!output.local_triangles.empty(),
+    Require(!local.empty(),
             "offset hovering plate support triangles must not be empty");
-    Require(AllCoordinatesFinite(output.local_triangles),
+    Require(AllCoordinatesFinite(local),
             "offset hovering plate support contains non-finite coordinates");
     Require(bounds.valid && bounds.min[2] >= -0.5,
             "offset support mesh reaches below the build plate");
@@ -366,8 +400,199 @@ void CheckLocalCoordinatesFollowModelCenter()
                 bounds.min[1] >= -25.0 && bounds.max[1] <= 25.0,
             "offset support footprints are not in local coordinates: " +
                 DescribeBounds(bounds));
-    Require(output.volume_mm3 > 0.0,
+    Require(volume > 0.0,
             "offset hovering plate support volume must be positive");
+}
+
+void CheckMultipleSupportBlocks()
+{
+    // A single model with two disconnected hovering plates must produce two
+    // independent support blocks, so the UI can list/show/hide them separately.
+    SupportModelInput input;
+    input.name = "two_plates";
+    std::vector<SliceTriangle> triangles =
+        MakeBox(-40.0, -10.0, 20.0, -20.0, 10.0, 22.0);
+    const std::vector<SliceTriangle> second =
+        MakeBox(20.0, -10.0, 20.0, 40.0, 10.0, 22.0);
+    triangles.insert(triangles.end(), second.begin(), second.end());
+    input.world_triangles_mm = std::move(triangles);
+    input.model_center_x_mm = 0.0;
+    input.model_center_y_mm = 0.0;
+
+    SupportGenerationOutput output;
+    std::string error;
+    const bool ok = GenerateSupportForModel(input, output, error);
+    if (!ok)
+    {
+        std::cerr << "[FAIL] two-plate support generation failed: " << error
+                  << '\n';
+        ++g_failures;
+        return;
+    }
+
+    std::cout << "two plates: state="
+              << (output.state == SupportState::Generated ? "Generated" : "other")
+              << ", blocks=" << output.blocks.size()
+              << ", triangles=" << TotalTriangles(output)
+              << ", volume_mm3=" << Format(TotalVolume(output)) << '\n';
+
+    Require(output.state == SupportState::Generated,
+            "two hovering plates should generate supports");
+    Require(output.blocks.size() == 2,
+            "two disconnected overhang regions should yield two support blocks, got " +
+                std::to_string(output.blocks.size()));
+    if (output.blocks.size() != 2)
+        return;
+    for (const SupportGenerationBlock& block : output.blocks)
+    {
+        Require(!block.local_triangles.empty(),
+                "support block geometry must not be empty");
+        Require(block.volume_mm3 > 0.0,
+                "support block volume must be positive");
+        Require(AllCoordinatesFinite(block.local_triangles),
+                "support block contains non-finite coordinates");
+    }
+    const MeshBounds first_bounds = ComputeBounds(output.blocks[0].local_triangles);
+    const MeshBounds second_bounds = ComputeBounds(output.blocks[1].local_triangles);
+    Require(first_bounds.valid && second_bounds.valid,
+            "support block bounds are invalid");
+    Require(first_bounds.max[0] < second_bounds.min[0] ||
+                second_bounds.max[0] < first_bounds.min[0],
+            "the two support blocks overlap in X instead of being separate");
+}
+void CheckSplitTriangleComponents()
+{
+    // Empty soup has no components.
+    Require(SplitTriangleComponents({}).empty(),
+            "splitting an empty triangle soup must return no components");
+
+    // A single closed box stays one component, in input order and coordinates.
+    const std::vector<SliceTriangle> single_box =
+        MakeBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+    const std::vector<std::vector<SliceTriangle>> single_components =
+        SplitTriangleComponents(single_box);
+    Require(single_components.size() == 1,
+            "a single box must be one component, got " +
+                std::to_string(single_components.size()));
+    if (single_components.size() == 1)
+    {
+        Require(single_components[0].size() == single_box.size(),
+                "single box component lost triangles");
+        Require(std::abs(SupportMeshVolumeMm3(single_components[0]) - 1.0) <=
+                    1.0e-9,
+                "single box component volume is " +
+                    Format(SupportMeshVolumeMm3(single_components[0])) +
+                    ", expected 1");
+        bool order_ok = single_components[0].size() == single_box.size();
+        for (std::size_t index = 0; order_ok && index < single_box.size(); ++index)
+            for (int corner = 0; corner < 3; ++corner)
+                for (int axis = 0; axis < 3; ++axis)
+                    if (single_components[0][index].vertices[corner][axis] !=
+                        single_box[index].vertices[corner][axis])
+                        order_ok = false;
+        Require(order_ok,
+                "component splitting must keep the input triangle order and "
+                "coordinates");
+    }
+
+    // Two boxes that share no vertex split into two components ordered by their
+    // bounding box minimum X (the near box is inserted first here).
+    std::vector<SliceTriangle> far_boxes =
+        MakeBox(10.0, 0.0, 0.0, 11.0, 1.0, 1.0);
+    const std::vector<SliceTriangle> near_box =
+        MakeBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+    far_boxes.insert(far_boxes.begin(), near_box.begin(), near_box.end());
+    const std::vector<std::vector<SliceTriangle>> far_components =
+        SplitTriangleComponents(far_boxes);
+    Require(far_components.size() == 2,
+            "two separate boxes must split into two components, got " +
+                std::to_string(far_components.size()));
+    if (far_components.size() == 2)
+    {
+        Require(far_components[0].size() == 12 && far_components[1].size() == 12,
+                "each separated box component must keep its 12 triangles");
+        const MeshBounds first_bounds = ComputeBounds(far_components[0]);
+        const MeshBounds second_bounds = ComputeBounds(far_components[1]);
+        Require(first_bounds.valid && second_bounds.valid,
+                "split component bounds are invalid");
+        Require(first_bounds.min[0] <= 1.0e-9 &&
+                    second_bounds.min[0] >= 10.0 - 1.0e-9,
+                "split components must be ordered by bounding box minimum X");
+        Require(std::abs(SupportMeshVolumeMm3(far_components[0]) - 1.0) <=
+                        1.0e-9 &&
+                    std::abs(SupportMeshVolumeMm3(far_components[1]) - 1.0) <=
+                        1.0e-9,
+                "separated box component volume must stay 1 mm^3");
+    }
+
+    // Two boxes sharing a whole face weld into one component through the shared
+    // vertices.
+    std::vector<SliceTriangle> welded_boxes =
+        MakeBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+    const std::vector<SliceTriangle> right_box =
+        MakeBox(1.0, 0.0, 0.0, 2.0, 1.0, 1.0);
+    welded_boxes.insert(welded_boxes.end(), right_box.begin(), right_box.end());
+    const std::vector<std::vector<SliceTriangle>> welded_components =
+        SplitTriangleComponents(welded_boxes);
+    Require(welded_components.size() == 1,
+            "boxes sharing a face must weld into one component, got " +
+                std::to_string(welded_components.size()));
+    if (welded_components.size() == 1)
+    {
+        Require(welded_components[0].size() == 24,
+                "welded component must keep all 24 triangles");
+        Require(std::abs(SupportMeshVolumeMm3(welded_components[0]) - 2.0) <=
+                    1.0e-9,
+                "welded two-box component volume must be 2 mm^3, got " +
+                    Format(SupportMeshVolumeMm3(welded_components[0])));
+    }
+
+    // Exactly coincident duplicated boxes also weld into a single component.
+    std::vector<SliceTriangle> duplicated_boxes =
+        MakeBox(-1.0, -1.0, -1.0, 0.0, 0.0, 0.0);
+    const std::vector<SliceTriangle> duplicate_box =
+        MakeBox(-1.0, -1.0, -1.0, 0.0, 0.0, 0.0);
+    duplicated_boxes.insert(duplicated_boxes.end(), duplicate_box.begin(),
+                            duplicate_box.end());
+    Require(SplitTriangleComponents(duplicated_boxes).size() == 1,
+            "coincident duplicated boxes must weld into one component");
+
+    // A gap larger than the 1e-6 mm weld tolerance keeps the boxes separate.
+    std::vector<SliceTriangle> gap_boxes =
+        MakeBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+    const std::vector<SliceTriangle> shifted_box =
+        MakeBox(1.001, 0.0, 0.0, 2.001, 1.0, 1.0);
+    gap_boxes.insert(gap_boxes.end(), shifted_box.begin(), shifted_box.end());
+    Require(SplitTriangleComponents(gap_boxes).size() == 2,
+            "boxes separated by more than the weld tolerance must stay "
+            "separate");
+
+    // Linear-time smoke test: thousands of unrelated components must not show
+    // quadratic behaviour (the split is a single hash pass plus a sort).
+    std::vector<SliceTriangle> many_boxes;
+    many_boxes.reserve(3000 * 12);
+    for (int index = 0; index < 3000; ++index)
+    {
+        const double x = static_cast<double>(index) * 3.0;
+        const std::vector<SliceTriangle> box =
+            MakeBox(x, 0.0, 0.0, x + 1.0, 1.0, 1.0);
+        many_boxes.insert(many_boxes.end(), box.begin(), box.end());
+    }
+    const auto split_start = std::chrono::steady_clock::now();
+    const std::vector<std::vector<SliceTriangle>> many_components =
+        SplitTriangleComponents(many_boxes);
+    const auto split_end = std::chrono::steady_clock::now();
+    const double split_ms =
+        std::chrono::duration<double, std::milli>(split_end - split_start)
+            .count();
+    Require(many_components.size() == 3000,
+            "3000 separate boxes must split into 3000 components, got " +
+                std::to_string(many_components.size()));
+
+    std::cout << "component split: single box 1, far boxes 2, welded face 1, "
+                 "duplicated box 1, gap 2, 3000 disjoint boxes -> "
+              << many_components.size() << " components in " << Format(split_ms)
+              << " ms\n";
 }
 } // namespace
 
@@ -377,10 +602,12 @@ int main()
 
     CheckLocalWorldCoordinates();
     CheckMeshVolume();
+    CheckSplitTriangleComponents();
     CheckEmptyModelNeedsNoSupport();
     CheckHoveringPlateGeneratesSupports();
     CheckOnPlateModelNeedsNoSupport();
     CheckLocalCoordinatesFollowModelCenter();
+    CheckMultipleSupportBlocks();
 
     if (g_failures != 0)
     {

@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/scipy/scipy",
+  "commit": "e4e854eaa8f18d807cd3496028e257e36caa93cc",
+  "files": {
+    "scipy/interpolate/src/dfitpack.c": "8ce8cd76a1cceb5cb9eb93794eaa6d52b6e68e768963a8056e7297751d214085",
+    "scipy/interpolate/src/dfitpack.h": "204e28a6991142eec1b97cf75f3b5f6f0ac0cba3bec6a2263273179c84ab4cce",
+    "LICENSE.txt": "221e59f5e910fd7f94e44f0dac77436a11338c285c6346232e4a850a50da0e94"
+  }
+}

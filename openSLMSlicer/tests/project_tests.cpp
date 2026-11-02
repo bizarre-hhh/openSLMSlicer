@@ -21,6 +21,7 @@
 #include <QDockWidget>
 #include <QMouseEvent>
 #include <QListWidget>
+#include <QTreeWidget>
 #include <QLocale>
 #include <QToolBar>
 #include <QToolButton>
@@ -34,6 +35,7 @@
 #include <QTimer>
 #include <QWidget>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -54,6 +56,7 @@
 #include "scene_viewport.h"
 #include "slice_export.h"
 #include "slice_file_info_dialog.h"
+#include "view_toolbar.h"
 #include "welcome_dialog.h"
 
 namespace
@@ -177,6 +180,37 @@ void ScrollViewport(double y_offset = 3.0)
     callback(window, 0, y_offset);
 }
 
+// Injects Dear ImGui mouse input at a screen position because the test viewport
+// is hidden and receives no GLFW cursor messages. ImGui resolves hover from the
+// previous frame and fires the button on release.
+void ClickOverlay(SceneViewport& viewport, const glm::vec2& point)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMousePosEvent(point.x, point.y);
+    Require(viewport.RenderFrame(), "render overlay hover frame");
+    io.AddMousePosEvent(point.x, point.y);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+    Require(viewport.RenderFrame(), "render overlay press frame");
+    io.AddMousePosEvent(point.x, point.y);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+    Require(viewport.RenderFrame(), "render overlay release frame");
+}
+
+// Moves the injected ImGui cursor off every overlay so later wheel tests are
+// not swallowed by a hovered toolbar.
+void ClearOverlayHover(SceneViewport& viewport)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMousePosEvent(-std::numeric_limits<float>::max(),
+                        -std::numeric_limits<float>::max());
+    Require(viewport.RenderFrame(), "clear overlay hover");
+}
+
+glm::vec2 ToolbarButtonCenter(const ViewToolbar::Layout& layout, int index)
+{
+    return ViewToolbar::ButtonMinimum(layout, index) + layout.button_size * 0.5f;
+}
+
 int failures = 0;
 void Run(const char* name, const std::function<void()>& test)
 {
@@ -239,7 +273,14 @@ void WithFile(const QString& path, const std::function<void()>& operation)
         auto* file = qobject_cast<QFileDialog*>(dialog);
         Require(file != nullptr, "expected a file dialog");
         file->setDirectory(QFileInfo(path).absolutePath());
-        file->selectFile(QFileInfo(path).fileName());
+        const QString file_name = QFileInfo(path).fileName();
+        // Write the name into the dialog's own line edit: selectFile() can be
+        // lost when the directory model repopulates, and the save dialog's
+        // initial name would win otherwise.
+        if (auto* edit = file->findChild<QLineEdit*>(QStringLiteral("fileNameEdit")))
+            edit->setText(file_name);
+        else
+            file->selectFile(file_name);
         QMetaObject::invokeMethod(file, "accept", Qt::QueuedConnection);
     }, operation);
 }
@@ -259,6 +300,50 @@ void Trigger(SceneEditorWindow& window, const char* name)
     auto* action = window.findChild<QAction*>(QString::fromLatin1(name));
     Require(action != nullptr, "missing project action");
     action->trigger();
+}
+
+struct TestTriangle
+{
+    std::array<double, 3> vertices[3];
+};
+
+// Axis aligned closed box (12 triangles) used to build synthetic STL fixtures.
+std::vector<TestTriangle> MakeTestBox(double x_min, double y_min, double z_min,
+                                      double x_max, double y_max, double z_max)
+{
+    const std::array<std::array<double, 3>, 8> vertices{{
+        {{x_min, y_min, z_min}}, {{x_max, y_min, z_min}},
+        {{x_max, y_max, z_min}}, {{x_min, y_max, z_min}},
+        {{x_min, y_min, z_max}}, {{x_max, y_min, z_max}},
+        {{x_max, y_max, z_max}}, {{x_min, y_max, z_max}}}};
+    const std::array<std::array<int, 3>, 12> faces{{
+        {{0, 2, 1}}, {{0, 3, 2}}, {{4, 5, 6}}, {{4, 6, 7}},
+        {{0, 1, 5}}, {{0, 5, 4}}, {{1, 2, 6}}, {{1, 6, 5}},
+        {{2, 3, 7}}, {{2, 7, 6}}, {{3, 0, 4}}, {{3, 4, 7}}}};
+    std::vector<TestTriangle> triangles;
+    triangles.reserve(faces.size());
+    for (const auto& face : faces)
+    {
+        TestTriangle triangle{};
+        for (int corner = 0; corner < 3; ++corner)
+            triangle.vertices[corner] = vertices[face[corner]];
+        triangles.push_back(triangle);
+    }
+    return triangles;
+}
+
+std::vector<SliceTriangle> ToSliceTriangles(const std::vector<TestTriangle>& triangles)
+{
+    std::vector<SliceTriangle> slice_triangles;
+    slice_triangles.reserve(triangles.size());
+    for (const TestTriangle& source : triangles)
+    {
+        SliceTriangle triangle{};
+        for (int corner = 0; corner < 3; ++corner)
+            triangle.vertices[corner] = source.vertices[corner];
+        slice_triangles.push_back(triangle);
+    }
+    return slice_triangles;
 }
 
 void FileTests(const QString& directory)
@@ -493,6 +578,85 @@ void SceneTests(const QString& directory)
                 "zoom out continued past the limit");
         viewport.ResetView();
     });
+    Run("view toolbar is a centered strip at the top of the viewport", [&]()
+    {
+        const auto layout = ViewToolbar::GetLayout({1280.0f, 800.0f}, 1.0f);
+        Require(layout.scale > 0.0f && layout.size.x > 0.0f, "view toolbar has no layout");
+        Require(std::abs(layout.minimum.x + layout.size.x * 0.5f - 640.0f) < 0.01f,
+                "view toolbar is not horizontally centered");
+        Require(layout.minimum.y >= 0.0f && layout.minimum.y + layout.size.y < 64.0f,
+                "view toolbar is not against the top edge");
+        const glm::vec2 place_minimum =
+            ViewToolbar::ButtonMinimum(layout, ViewToolbar::kPlaceOnPlateButton);
+        const glm::vec2 marker_minimum =
+            ViewToolbar::ButtonMinimum(layout, ViewToolbar::kAxisMarkerButton);
+        const glm::vec2 zoom_in_minimum =
+            ViewToolbar::ButtonMinimum(layout, ViewToolbar::kZoomInButton);
+        const glm::vec2 zoom_out_minimum =
+            ViewToolbar::ButtonMinimum(layout, ViewToolbar::kZoomOutButton);
+        Require(place_minimum.x < marker_minimum.x &&
+                    marker_minimum.x < zoom_in_minimum.x &&
+                    zoom_in_minimum.x < zoom_out_minimum.x,
+                "view toolbar button order changed");
+        Require(zoom_out_minimum.x + layout.button_size.x <=
+                    layout.minimum.x + layout.size.x - layout.padding + 0.01f,
+                "view toolbar buttons overflow the panel");
+        Require(ViewToolbar::Contains(
+                    {640.0f, layout.minimum.y + layout.size.y * 0.5f}, layout),
+                "toolbar center is outside the panel");
+        Require(!ViewToolbar::Contains({20.0f, 20.0f}, layout),
+                "viewport corner counted as toolbar");
+        Require(!ViewToolbar::Contains({640.0f, 240.0f}, layout),
+                "scene area counted as toolbar");
+        const auto small = ViewToolbar::GetLayout({320.0f, 120.0f}, 1.0f);
+        Require(small.scale > 0.0f && small.size.x < layout.size.x,
+                "view toolbar did not shrink with the viewport");
+    });
+    Run("view toolbar buttons zoom the camera like the wheel", [&]()
+    {
+        Require(viewport.RenderFrame(), "render toolbar layout frame");
+        ImGuiIO& io = ImGui::GetIO();
+        const auto layout = ViewToolbar::GetLayout(
+            glm::vec2(io.DisplaySize.x, io.DisplaySize.y),
+            ImGui::GetStyle().FontScaleDpi);
+        Require(layout.scale > 0.0f, "view toolbar is not drawable");
+        const glm::vec2 zoom_in_center =
+            ToolbarButtonCenter(layout, ViewToolbar::kZoomInButton);
+        const glm::vec2 zoom_out_center =
+            ToolbarButtonCenter(layout, ViewToolbar::kZoomOutButton);
+
+        viewport.ResetView();
+        const float home = viewport.GetCamera().Distance();
+        ClickOverlay(viewport, zoom_in_center);
+        const float zoomed = viewport.GetCamera().Distance();
+        Require(zoomed < home * 0.9f, "toolbar zoom-in button did not move closer");
+        Require(std::abs(zoomed - home * 0.7225f) <= home * 1.0e-3f,
+                "toolbar zoom-in step differs from the wheel rate");
+        ClickOverlay(viewport, zoom_out_center);
+        Require(std::abs(viewport.GetCamera().Distance() - home) <= home * 1.0e-4f,
+                "toolbar zoom-out button did not restore the view");
+        ClearOverlayHover(viewport);
+        viewport.ResetView();
+    });
+    Run("view toolbar axis marker button hides and shows the square markers", [&]()
+    {
+        Require(viewport.AxisMarkersVisible(), "axis markers start hidden");
+        Require(viewport.RenderFrame(), "render axis marker layout frame");
+        ImGuiIO& io = ImGui::GetIO();
+        const auto layout = ViewToolbar::GetLayout(
+            glm::vec2(io.DisplaySize.x, io.DisplaySize.y),
+            ImGui::GetStyle().FontScaleDpi);
+        Require(layout.scale > 0.0f, "view toolbar is not drawable");
+        const glm::vec2 toggle_center =
+            ToolbarButtonCenter(layout, ViewToolbar::kAxisMarkerButton);
+
+        ClickOverlay(viewport, toggle_center);
+        Require(!viewport.AxisMarkersVisible(), "marker button did not hide axis markers");
+        Require(viewport.RenderFrame(), "render hidden axis markers");
+        ClickOverlay(viewport, toggle_center);
+        Require(viewport.AxisMarkersVisible(), "marker button did not show axis markers again");
+        ClearOverlayHover(viewport);
+    });
     Run("pan uses the grabbed surface depth", [&]()
     {
         Camera camera;
@@ -628,6 +792,34 @@ void SceneTests(const QString& directory)
         Require(!viewport.CurrentModelInfo(), "new project retains active model");
         Require(viewport.GetCamera().Yaw() == -90.0f && viewport.GetCamera().Pitch() == 35.0f,
                 "new project not using Home");
+    });
+    Run("viewport click replaces the selection unless Ctrl adds to it", [&]()
+    {
+        std::string load_error;
+        glm::vec3 size_mm;
+        Require(viewport.LoadStl(std::string(TEST_ASSET_DIR "/cube_30mm.stl"),
+                                 load_error, size_mm), load_error.c_str());
+        const auto first = viewport.ModelInfos().back().id;
+        Require(viewport.LoadStl(std::string(TEST_ASSET_DIR "/sphere_30mm.stl"),
+                                 load_error, size_mm), load_error.c_str());
+        const auto second = viewport.ModelInfos().back().id;
+        viewport.ClearModelSelection();
+        viewport.SelectModelOnClick(first, false);
+        Require(viewport.ModelInfo(first)->selected && !viewport.ModelInfo(second)->selected,
+                "plain click did not select the clicked model alone");
+        viewport.SelectModelOnClick(second, false);
+        Require(!viewport.ModelInfo(first)->selected && viewport.ModelInfo(second)->selected,
+                "plain click did not replace the previous selection");
+        viewport.SelectModelOnClick(first, true);
+        Require(viewport.ModelInfo(first)->selected && viewport.ModelInfo(second)->selected,
+                "Ctrl+click did not add to the selection");
+        viewport.SelectModelOnClick(first, true);
+        Require(viewport.ModelInfo(first)->selected && viewport.ModelInfo(second)->selected,
+                "Ctrl+click on an already selected model removed it");
+        // A plain click on a selected model keeps the group so a drag may start.
+        viewport.SelectModelOnClick(second, false);
+        Require(viewport.ModelInfo(first)->selected && viewport.ModelInfo(second)->selected,
+                "plain click on a selected model collapsed the selection");
     });
 }
 
@@ -1046,6 +1238,89 @@ void PlatePlacementTests(const QString& directory)
         Require(viewport.Redo(error) && viewport.Redo(error) && viewport.ModelInfos().back().world_bounds_min_mm.z == 0,
                 "array and placement redo sequence failed");
     });
+    Run("view toolbar place-on-plate button grounds the selection and disables without one", [&]()
+    {
+        viewport.NewProject();
+        const auto id = load("cube_30mm.stl");
+        Require(viewport.MoveModelTo(id, {10, -5, 25}), "raise toolbar placement model");
+        viewport.SetModelSelected(id, true);
+        Require(viewport.CanPlaceSelectedModelsOnPlate(),
+                "placement unavailable for a selected raised model");
+        Require(viewport.RenderFrame(), "render placement toolbar");
+        ImGuiIO& io = ImGui::GetIO();
+        const auto layout = ViewToolbar::GetLayout(
+            glm::vec2(io.DisplaySize.x, io.DisplaySize.y),
+            ImGui::GetStyle().FontScaleDpi);
+        Require(layout.scale > 0.0f, "view toolbar is not drawable");
+        const glm::vec2 place_center =
+            ToolbarButtonCenter(layout, ViewToolbar::kPlaceOnPlateButton);
+        const auto history = viewport.HistoryRevision();
+        ClickOverlay(viewport, place_center);
+        Require(viewport.ModelInfo(id)->world_bounds_min_mm.z == 0,
+                "toolbar place-on-plate did not ground the model");
+        Require(viewport.HistoryRevision() == history + 1,
+                "toolbar place-on-plate was not one history step");
+        // Without a selection the button is disabled and a click changes nothing.
+        viewport.ClearModelSelection();
+        Require(!viewport.CanPlaceSelectedModelsOnPlate(),
+                "placement available without a selection");
+        const auto grounded = viewport.SnapshotProject();
+        Require(viewport.RenderFrame(), "render disabled placement toolbar");
+        ClickOverlay(viewport, place_center);
+        Require(SameProject(grounded, viewport.SnapshotProject()),
+                "disabled place-on-plate button changed the scene");
+        ClearOverlayHover(viewport);
+    });
+    Run("place-on-plate is blocked only by supports on the selected models", [&]()
+    {
+        viewport.NewProject();
+        const auto supported = load("cube_30mm.stl");
+        Require(viewport.TransformModelTo(supported, {{0, 0, 0}, {1, 1, 1}, {0, 30, 0}},
+                                          TransformMode::Rotate),
+                "tilt supported placement fixture");
+        SceneViewport::SupportGenerateSummary summary;
+        bool cancelled = false;
+        QStringList issues;
+        QString support_error;
+        const auto progress = [](std::size_t, std::size_t) { return true; };
+        Require(viewport.GenerateSupportsForAll(progress, summary, cancelled, issues,
+                                                support_error), qPrintable(support_error));
+        Require(viewport.HasGeneratedSupports(), "placement support fixture missing");
+        const auto free_model = load("cube_30mm.stl");
+        Require(viewport.MoveModelTo(free_model, {35, 25, 20}),
+                "raise support-free placement fixture");
+        viewport.ClearModelSelection();
+        viewport.SetModelSelected(free_model, true);
+        Require(viewport.CanPlaceSelectedModelsOnPlate(),
+                "supports on another model blocked a support-free selection");
+        Require(viewport.RenderFrame(), "render mixed placement toolbar");
+        ImGuiIO& io = ImGui::GetIO();
+        const auto layout = ViewToolbar::GetLayout(
+            glm::vec2(io.DisplaySize.x, io.DisplaySize.y),
+            ImGui::GetStyle().FontScaleDpi);
+        Require(layout.scale > 0.0f, "view toolbar is not drawable");
+        const glm::vec2 place_center =
+            ToolbarButtonCenter(layout, ViewToolbar::kPlaceOnPlateButton);
+        const auto history = viewport.HistoryRevision();
+        ClickOverlay(viewport, place_center);
+        Require(viewport.ModelInfo(free_model)->world_bounds_min_mm.z == 0,
+                "toolbar placement did not ground the support-free selection");
+        Require(viewport.HasGeneratedSupports(),
+                "grounding a support-free selection deleted other supports");
+        Require(viewport.HistoryRevision() == history + 1,
+                "mixed placement was not one history step");
+        // Selecting the supported model blocks placement again.
+        viewport.ClearModelSelection();
+        viewport.SetModelSelected(supported, true);
+        Require(!viewport.CanPlaceSelectedModelsOnPlate(),
+                "placement available with a supported model selected");
+        const auto blocked = viewport.SnapshotProject();
+        Require(viewport.RenderFrame(), "render blocked placement toolbar");
+        ClickOverlay(viewport, place_center);
+        Require(SameProject(blocked, viewport.SnapshotProject()),
+                "blocked place-on-plate changed the scene");
+        ClearOverlayHover(viewport);
+    });
 }
 
 void DuplicationTests(const QString& directory)
@@ -1358,9 +1633,13 @@ void NamingTests(const QString& directory)
                 "generated supports missing");
         const auto statuses = viewport.SupportStatuses();
         Require(statuses.size() == 1 && statuses[0].state == SupportState::Generated &&
+                statuses[0].support_id == kSupportIdBase && statuses[0].visible &&
                 statuses[0].triangle_count > 0 && statuses[0].volume_mm3 > 0.0,
                 "support entry state/geometry");
+        viewport.SetModelSelected(id, true);
         Require(viewport.RenderFrame(), "render frame with support geometry");
+        Require(!viewport.CanPlaceSelectedModelsOnPlate(),
+                "placement available while the selected model has supports");
         viewport.SetSupportsVisible(false);
         Require(viewport.RenderFrame(), "render frame with hidden supports");
         viewport.SetSupportsVisible(true);
@@ -1425,6 +1704,87 @@ void NamingTests(const QString& directory)
                     TransformMode::Translate), "raise support owner");
         Require(!viewport.HasGeneratedSupports() && viewport.SupportEntryCount() == 0,
                 "world Z movement did not delete supports");
+    });
+    Run("support groups are per region and their visibility is display-only", [&]()
+    {
+        ProjectData project;
+        ProjectModel model;
+        model.source_path = QStringLiteral("D:/synthetic/multi_support_cube.stl");
+        model.stl_data = ReadBytes(QStringLiteral(TEST_ASSET_DIR "/cube_30mm.stl"));
+        model.name = QStringLiteral("multi_support");
+        project.models.push_back(model);
+        ProjectSupportRecord first_support;
+        first_support.owner_model_index = 0;
+        first_support.state = SupportState::Generated;
+        first_support.volume_mm3 = 216.0;
+        first_support.local_triangles =
+            ToSliceTriangles(MakeTestBox(-10.0, -10.0, 0.0, -4.0, -4.0, 4.0));
+        ProjectSupportRecord second_support = first_support;
+        second_support.volume_mm3 = 512.0;
+        second_support.local_triangles =
+            ToSliceTriangles(MakeTestBox(4.0, 4.0, 0.0, 10.0, 10.0, 6.0));
+        project.supports = {first_support, second_support};
+
+        viewport.NewProject();
+        Require(viewport.ApplyProject(project, error), qPrintable(error));
+        Require(viewport.RenderFrame(), "render multiple supports");
+        const auto statuses = viewport.SupportStatuses();
+        Require(statuses.size() == 2, "two support records should become two groups");
+        Require(statuses[0].support_id != statuses[1].support_id &&
+                statuses[0].name == QStringLiteral("multi_support 支撑 1") &&
+                statuses[1].name == QStringLiteral("multi_support 支撑 2"),
+                "support groups are not numbered separately");
+        Require(statuses[0].visible && statuses[1].visible,
+                "reloaded supports should start visible");
+
+        const auto revision = viewport.SupportStateRevision();
+        Require(viewport.SetSupportVisible(statuses[1].support_id, false),
+                "hide one support");
+        Require(!viewport.SupportVisible(statuses[1].support_id) &&
+                viewport.SupportVisible(statuses[0].support_id),
+                "per-support visibility did not update independently");
+        Require(viewport.SupportStateRevision() == revision,
+                "per-support visibility must not dirty the document");
+        Require(viewport.RenderFrame(), "render one hidden support");
+
+        // Hidden supports stay in slicing and export: visibility is display-only,
+        // matching how hidden models behave.
+        SliceSettings settings;
+        settings.layer_thickness_mm = 0.1;
+        settings.hatch.enabled = false;
+        bool cancelled = false;
+        QString slice_error;
+        QStringList slice_issues;
+        const auto progress = [](std::size_t, std::size_t) { return true; };
+        Require(viewport.GenerateSlice(settings, progress, cancelled, slice_error,
+                                       slice_issues), qPrintable(slice_error));
+        Require(viewport.SliceInfo().support_contour_count > 0,
+                "support geometry missing from the slice preview");
+        const SliceBuildSnapshot snapshot = viewport.BuildSliceExportSnapshot();
+        const auto support_parts = std::count_if(
+            snapshot.parts.begin(), snapshot.parts.end(),
+            [](const SlicePartInfo& part)
+            { return part.kind == SlicePartKind::Support; });
+        Require(support_parts == 2,
+                "hidden supports must stay in the export snapshot");
+        viewport.ClearSlicePreview();
+
+        // Both groups are persisted as separate records; visibility is not.
+        const ProjectData saved = viewport.SnapshotProject();
+        Require(saved.supports.size() == 2, "supports were not saved as two records");
+        const QString file = directory + "/multi-support.slmproj";
+        ProjectData read_back;
+        Require(ProjectFile::Write(file, saved, error) &&
+                ProjectFile::Read(file, read_back, error), qPrintable(error));
+        Require(read_back.supports.size() == 2,
+                "two support records lost in the project file");
+        Require(viewport.ApplyProject(read_back, error), qPrintable(error));
+        const auto reloaded = viewport.SupportStatuses();
+        Require(reloaded.size() == 2 &&
+                reloaded[0].name == QStringLiteral("multi_support 支撑 1") &&
+                reloaded[1].name == QStringLiteral("multi_support 支撑 2") &&
+                reloaded[0].visible && reloaded[1].visible,
+                "reloaded support groups lost numbering or visibility defaults");
     });
 }
 
@@ -2091,8 +2451,9 @@ void UiTests(const QString& directory)
         WithDialog([](QDialog* dialog) { dialog->reject(); }, [&]()
         { Trigger(window, "saveProjectAsAction"); });
         Trigger(window, "undoAction");
-        auto* models = window.findChild<QListWidget*>("stlModelList");
-        Require(viewport.ModelCount() == count && models->count() == int(count), "Undo deletion did not update model list");
+        auto* models = window.findChild<QTreeWidget*>("stlModelList");
+        Require(viewport.ModelCount() == count && models->topLevelItemCount() == int(count),
+                "Undo deletion did not update model list");
     });
     Run("operation record window is reusable and latest operations are first", [&]()
     {
@@ -2119,14 +2480,17 @@ void UiTests(const QString& directory)
     {
         for (int i = 0; i < 3; ++i)
             WithFile(model, [&]() { Trigger(window, "openStlAction"); });
-        auto* list = window.findChild<QListWidget*>(QStringLiteral("stlModelList"));
-        Require(list && list->count() == 3 && viewport.ModelCount() == 3,
+        auto* list = window.findChild<QTreeWidget*>(QStringLiteral("stlModelList"));
+        Require(list && list->topLevelItemCount() == 3 && viewport.ModelCount() == 3,
                 "order fixture models");
         std::vector<std::uint64_t> ids;
-        for (int i = 0; i < list->count(); ++i)
-            ids.push_back(list->item(i)->data(Qt::UserRole).toULongLong());
+        for (int i = 0; i < list->topLevelItemCount(); ++i)
+            ids.push_back(list->topLevelItem(i)->data(0, Qt::UserRole).toULongLong());
 
-        const auto row = [&](int index) { return list->itemWidget(list->item(index)); };
+        const auto row = [&](int index)
+        {
+            return list->itemWidget(list->topLevelItem(index), 0);
+        };
         const auto order_spin = [&](int index)
         {
             return row(index)->findChild<QSpinBox*>(QStringLiteral("modelOrderSpin"));
@@ -2145,15 +2509,15 @@ void UiTests(const QString& directory)
             Require(infos.size() == expected.size(), "model order size");
             for (std::size_t i = 0; i < expected.size(); ++i)
                 Require(infos[i].id == expected[i], "viewport model order");
-            auto* current_list = window.findChild<QListWidget*>(QStringLiteral("stlModelList"));
-            Require(current_list->count() == static_cast<int>(expected.size()),
+            auto* current_list = window.findChild<QTreeWidget*>(QStringLiteral("stlModelList"));
+            Require(current_list->topLevelItemCount() == static_cast<int>(expected.size()),
                     "model order list count");
-            for (int i = 0; i < current_list->count(); ++i)
+            for (int i = 0; i < current_list->topLevelItemCount(); ++i)
             {
-                Require(current_list->item(i)->data(Qt::UserRole).toULongLong() ==
+                Require(current_list->topLevelItem(i)->data(0, Qt::UserRole).toULongLong() ==
                             expected[static_cast<std::size_t>(i)],
                         "model order list");
-                auto* spin = current_list->itemWidget(current_list->item(i))
+                auto* spin = current_list->itemWidget(current_list->topLevelItem(i), 0)
                                  ->findChild<QSpinBox*>(QStringLiteral("modelOrderSpin"));
                 Require(spin && spin->value() == i + 1, "order numbers did not renumber");
             }
@@ -2250,8 +2614,9 @@ void UiTests(const QString& directory)
         WithFile(model, [&]() { Trigger(window, "openStlAction"); });
         WithFile(model, [&]() { Trigger(window, "openStlAction"); });
         const auto id = viewport.ModelInfos()[0].id;
-        auto* model_list = window.findChild<QListWidget*>("stlModelList");
-        model_list->itemWidget(model_list->item(0))->findChild<QToolButton*>("selectModelButton")->click();
+        auto* model_list = window.findChild<QTreeWidget*>("stlModelList");
+        model_list->itemWidget(model_list->topLevelItem(0), 0)
+            ->findChild<QToolButton*>("selectModelButton")->click();
         const QString transform_project = directory + QStringLiteral("/参数编辑.slmproj");
         WithFile(transform_project, [&]() { Trigger(window, "saveProjectAction"); });
         auto* move = window.findChild<QPushButton*>("modelTranslateButton");
@@ -2367,13 +2732,15 @@ void UiTests(const QString& directory)
                 toolbar->actions().contains(duplicate) && toolbar->actions().contains(array) &&
                 !duplicate->icon().isNull() && !array->icon().isNull(), "duplication toolbar state/icons");
         Require(duplicate->shortcut() == QKeySequence("Ctrl+D") && array->shortcut() == QKeySequence("Ctrl+Shift+D"), "duplication shortcuts");
-        auto* model_list = window.findChild<QListWidget*>("stlModelList");
-        model_list->itemWidget(model_list->item(0))->findChild<QToolButton*>("selectModelButton")->click();
+        auto* model_list = window.findChild<QTreeWidget*>("stlModelList");
+        model_list->itemWidget(model_list->topLevelItem(0), 0)
+            ->findChild<QToolButton*>("selectModelButton")->click();
         Require(duplicate->isEnabled() && array->isEnabled(), "selection did not enable duplication");
         const auto original = viewport.ModelInfos()[0].id;
         Trigger(window, "duplicateModelsAction");
         Require(viewport.ModelCount() == 2 && window.isWindowModified() &&
-                window.findChild<QListWidget*>("stlModelList")->count() == 2, "UI duplicate list/title");
+                window.findChild<QTreeWidget*>("stlModelList")->topLevelItemCount() == 2,
+                "UI duplicate list/title");
         Trigger(window, "undoAction");
         Require(viewport.ModelCount() == 1 && viewport.ModelInfo(original)->selected, "UI duplicate undo");
         const auto history = viewport.HistoryRevision();
@@ -2406,7 +2773,9 @@ void UiTests(const QString& directory)
         const auto expected = viewport.SnapshotProject();
         Require(viewport.ModelCount() == 6 && viewport.HistoryRevision() == history + 1 && !viewport.CanRedo(), "UI array generation/history");
         Trigger(window, "undoAction");
-        Require(viewport.ModelCount() == 1 && window.findChild<QListWidget*>("stlModelList")->count() == 1, "UI array undo list");
+        Require(viewport.ModelCount() == 1 &&
+                window.findChild<QTreeWidget*>("stlModelList")->topLevelItemCount() == 1,
+                "UI array undo list");
         Trigger(window, "redoAction");
         Require(SameProject(expected, viewport.SnapshotProject()), "UI array redo");
         const QString array_project = directory + QStringLiteral("/界面阵列.slmproj");
@@ -2429,8 +2798,9 @@ void UiTests(const QString& directory)
                 !action->icon().isNull() && action->shortcut() == QKeySequence("Ctrl+L"), "plate placement action/shortcut state");
         const auto id = viewport.ModelInfos()[0].id;
         Require(viewport.TransformModelTo(id, {{12, -8, 45}, {1.2f, 0.7f, 1.5f}, {35, 40, 25}}, TransformMode::Rotate), "raise UI placement model");
-        auto* list = window.findChild<QListWidget*>("stlModelList");
-        list->itemWidget(list->item(0))->findChild<QToolButton*>("selectModelButton")->click();
+        auto* list = window.findChild<QTreeWidget*>("stlModelList");
+        list->itemWidget(list->topLevelItem(0), 0)
+            ->findChild<QToolButton*>("selectModelButton")->click();
         Require(action->isEnabled(), "selection did not enable placement");
         const QString path = directory + QStringLiteral("/界面贴合基板.slmproj");
         WithFile(path, [&]() { Trigger(window, "saveProjectAsAction"); });
@@ -2462,11 +2832,14 @@ void UiTests(const QString& directory)
         viewport.NewProject();
         WithFile(model, [&]() { Trigger(window, "openStlAction"); });
         WithFile(model, [&]() { Trigger(window, "openStlAction"); });
-        auto* list = window.findChild<QListWidget*>("stlModelList");
+        auto* list = window.findChild<QTreeWidget*>("stlModelList");
         const auto original = viewport.ModelInfos()[0].id;
-        auto row = [&](int index) { return list->itemWidget(list->item(index)); };
+        auto row = [&](int index)
+        {
+            return list->itemWidget(list->topLevelItem(index), 0);
+        };
         auto label = [&](int index) { return row(index)->findChild<QLabel*>("modelRowName"); };
-        Require(list->item(0)->text() == QStringLiteral("cube_30mm") &&
+        Require(list->topLevelItem(0)->text(0) == QStringLiteral("cube_30mm") &&
                 label(1)->text() == QStringLiteral("cube_30mm (2)"), "UI import names not numbered/stripped");
         const QString path = directory + "/ui-names.slmproj";
         WithFile(path, [&]() { Trigger(window, "saveProjectAsAction"); });
@@ -2506,13 +2879,15 @@ void UiTests(const QString& directory)
             apply->click();
         }, [&]() { double_click(label(0)); });
         Require(viewport.ModelInfo(original)->name == QStringLiteral("打印零件") &&
-                list->item(0)->text() == QStringLiteral("打印零件") && label(0)->text() == QStringLiteral("打印零件") &&
+                list->topLevelItem(0)->text(0) == QStringLiteral("打印零件") &&
+                label(0)->text() == QStringLiteral("打印零件") &&
                 window.isWindowModified() && viewport.HistoryRevision() == history + 1 &&
                 !viewport.ModelInfo(original)->selected, "UI rename did not update list/history");
         row(0)->findChild<QToolButton*>("selectModelButton")->click();
         Require(window.findChild<QLabel*>("modelName")->text() == QStringLiteral("打印零件"), "renamed details missing");
         Trigger(window, "undoAction");
-        Require(list->item(0)->text() == QStringLiteral("cube_30mm") && label(0)->text() == QStringLiteral("cube_30mm") &&
+        Require(list->topLevelItem(0)->text(0) == QStringLiteral("cube_30mm") &&
+                label(0)->text() == QStringLiteral("cube_30mm") &&
                 window.findChild<QLabel*>("modelName")->text() == QStringLiteral("cube_30mm") && window.isWindowModified(),
                 "UI rename undo not synchronized");
         history = viewport.HistoryRevision();
@@ -2535,7 +2910,7 @@ void UiTests(const QString& directory)
                 saved.models[0].name == QStringLiteral("隐藏打印件") &&
                 saved.models[1].name == QStringLiteral("cube_30mm (2)"), "UI names not saved");
         WithFile(path, [&]() { Trigger(window, "openProjectAction"); });
-        Require(list->item(0)->text() == QStringLiteral("隐藏打印件") &&
+        Require(list->topLevelItem(0)->text(0) == QStringLiteral("隐藏打印件") &&
                 label(1)->text() == QStringLiteral("cube_30mm (2)"), "UI reopen lost names");
         row(0)->findChild<QToolButton*>("selectModelButton")->click();
         Trigger(window, "duplicateModelsAction");
@@ -2576,6 +2951,106 @@ void UiTests(const QString& directory)
                 "delete-all supports failed");
         Require(viewport.SnapshotProject().supports.empty(),
                 "deleted supports still present in the project snapshot");
+    });
+    Run("support groups appear as nested rows with per-support visibility", [&]()
+    {
+        viewport.EndTransformEditing();
+        // One model with two persisted support regions: the model list must show
+        // one nested row per support, each with its own visibility toggle.
+        ProjectData project;
+        ProjectModel model_entry;
+        model_entry.source_path = QStringLiteral("D:/synthetic/multi_support.stl");
+        model_entry.stl_data = ReadBytes(QStringLiteral(TEST_ASSET_DIR "/cube_30mm.stl"));
+        model_entry.name = QStringLiteral("multi_support");
+        project.models.push_back(model_entry);
+        ProjectSupportRecord first_support;
+        first_support.owner_model_index = 0;
+        first_support.state = SupportState::Generated;
+        first_support.volume_mm3 = 216.0;
+        first_support.local_triangles =
+            ToSliceTriangles(MakeTestBox(-10.0, -10.0, 0.0, -4.0, -4.0, 4.0));
+        ProjectSupportRecord second_support = first_support;
+        second_support.volume_mm3 = 512.0;
+        second_support.local_triangles =
+            ToSliceTriangles(MakeTestBox(4.0, 4.0, 0.0, 10.0, 10.0, 6.0));
+        project.supports = {first_support, second_support};
+
+        viewport.NewProject();
+        Require(viewport.ApplyProject(project, error), qPrintable(error));
+        // The one-click handler refreshes the model rows; every model already
+        // has support entries, so this only rebuilds the nested lines.
+        auto* generate_action = window.findChild<QAction*>("generateSupportAction");
+        Require(generate_action != nullptr, "support action missing");
+        generate_action->setEnabled(true);
+        Trigger(window, "generateSupportAction");
+        Require(viewport.SupportEntryCount() == 2, "persisted supports missing");
+        Require(window.statusBar()->currentMessage().contains(QStringLiteral("跳过 1")),
+                "existing supports were not skipped");
+        const auto model_id = viewport.ModelInfos()[0].id;
+        const auto statuses = viewport.SupportStatuses();
+        Require(statuses.size() == 2 &&
+                statuses[0].support_id != statuses[1].support_id,
+                "two support groups expected");
+        auto* tree = window.findChild<QTreeWidget*>("stlModelList");
+        Require(tree && tree->topLevelItemCount() == 1, "model tree fixture missing");
+        QTreeWidgetItem* model_item = tree->topLevelItem(0);
+        Require(model_item->data(0, Qt::UserRole).toULongLong() == model_id,
+                "model tree item lost its id");
+        Require(model_item->childCount() == 2 && model_item->isExpanded(),
+                "supports are not two visible child items of their model");
+        for (int i = 0; i < model_item->childCount(); ++i)
+        {
+            QTreeWidgetItem* support_item = model_item->child(i);
+            const auto support_id = support_item->data(0, Qt::UserRole).toULongLong();
+            const auto found = std::find_if(statuses.begin(), statuses.end(),
+                [support_id](const SceneViewport::SupportModelStatus& status)
+                { return status.support_id == support_id; });
+            Require(found != statuses.end() && found->owner_model_id == model_id,
+                    "support tree item is not attached to its owner model");
+            QWidget* support_row = tree->itemWidget(support_item, 0);
+            auto* toggle = support_row
+                ? support_row->findChild<QToolButton*>(
+                    QStringLiteral("toggleSupportVisibilityButton"))
+                : nullptr;
+            Require(toggle &&
+                    toggle->property("supportId").toULongLong() == support_id,
+                    "support tree row is missing its visibility toggle");
+        }
+        const auto toggle_buttons = window.findChildren<QToolButton*>(
+            QStringLiteral("toggleSupportVisibilityButton"));
+        const auto support_names = window.findChildren<QLabel*>(
+            QStringLiteral("supportRowName"));
+        Require(toggle_buttons.size() == 2,
+                "the model should show one tree child row per support group");
+        Require(support_names.size() == 2, "support row labels missing");
+        // Collapsing a model must survive a list rebuild (support changes/undo)
+        // instead of forcing every model open again.
+        model_item->setExpanded(false);
+        Trigger(window, "generateSupportAction");
+        tree = window.findChild<QTreeWidget*>("stlModelList");
+        model_item = tree->topLevelItem(0);
+        Require(model_item->childCount() == 2 && !model_item->isExpanded(),
+                "collapsed support children were re-expanded by a list rebuild");
+        model_item->setExpanded(true);
+        // Toggle one support row: display-only, like model visibility.
+        const auto revision = viewport.SupportStateRevision();
+        const bool was_modified = window.isWindowModified();
+        QToolButton* first_toggle = toggle_buttons.front();
+        const auto first_id = first_toggle->property("supportId").toULongLong();
+        first_toggle->click();
+        Require(!viewport.SupportVisible(first_id),
+                "support row did not hide its support");
+        Require(first_toggle->text() == QStringLiteral("显示"),
+                "support toggle label not updated");
+        Require(viewport.SupportStateRevision() == revision,
+                "support visibility must not dirty the document");
+        Require(window.isWindowModified() == was_modified,
+                "support visibility must not change the modified flag");
+        first_toggle->click();
+        Require(viewport.SupportVisible(first_id),
+                "support row did not show its support again");
+        Require(first_toggle->text() == QStringLiteral("隐藏"),
+                "support toggle label not restored");
     });
     Run("slice menu generates a contour and fill preview without dirtying the project", [&]()
     {
@@ -2917,6 +3392,7 @@ int main(int argc, char* argv[])
                      capture_mode == QStringLiteral("--capture-rename") ||
                      capture_mode == QStringLiteral("--capture-array-dialog") ||
                      capture_mode == QStringLiteral("--capture-array-view") ||
+                     capture_mode == QStringLiteral("--capture-view-toolbar") ||
                      capture_mode == QStringLiteral("--capture-slice") ||
                      capture_mode == QStringLiteral("--capture-model-transform") ||
                      capture_mode.startsWith(QStringLiteral("--capture-gizmo-"))))
@@ -2951,6 +3427,106 @@ int main(int argc, char* argv[])
             glReadBuffer(GL_FRONT);
             glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.bits());
             Require(pixels.mirrored().save(QString::fromLocal8Bit(argv[2])), "capture array view");
+            return 0;
+        }
+        if (capture_mode == QStringLiteral("--capture-view-toolbar"))
+        {
+            viewport.ResetView();
+            Require(viewport.RenderFrame() && viewport.RenderFrame(), "view toolbar capture render");
+            ImGuiIO& io = ImGui::GetIO();
+            const int width = static_cast<int>(io.DisplaySize.x * io.DisplayFramebufferScale.x);
+            const int height = static_cast<int>(io.DisplaySize.y * io.DisplayFramebufferScale.y);
+            QImage pixels(width, height, QImage::Format_RGBA8888);
+            glReadBuffer(GL_FRONT);
+            glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.bits());
+            Require(pixels.mirrored().save(QString::fromLocal8Bit(argv[2])), "capture view toolbar");
+            // Hover the zoom-in button to capture the hover state and tooltip.
+            const auto layout = ViewToolbar::GetLayout(
+                glm::vec2(io.DisplaySize.x, io.DisplaySize.y),
+                ImGui::GetStyle().FontScaleDpi);
+            Require(layout.scale > 0.0f, "view toolbar layout for capture");
+            const glm::vec2 hover =
+                ToolbarButtonCenter(layout, ViewToolbar::kZoomInButton);
+            io.AddMousePosEvent(hover.x, hover.y);
+            Require(viewport.RenderFrame() && viewport.RenderFrame(), "view toolbar hover capture render");
+            QImage hovered(width, height, QImage::Format_RGBA8888);
+            glReadBuffer(GL_FRONT);
+            glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, hovered.bits());
+            Require(hovered.mirrored().save(QString::fromLocal8Bit(argv[2]) + ".hover.png"),
+                    "capture view toolbar hover");
+            // Hide the square axis markers to capture the toggled-off state.
+            io.AddMousePosEvent(-std::numeric_limits<float>::max(),
+                                -std::numeric_limits<float>::max());
+            viewport.SetAxisMarkersVisible(false);
+            Require(viewport.RenderFrame() && viewport.RenderFrame(),
+                    "axis markers off capture render");
+            QImage markers_off(width, height, QImage::Format_RGBA8888);
+            glReadBuffer(GL_FRONT);
+            glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, markers_off.bits());
+            Require(markers_off.mirrored().save(
+                        QString::fromLocal8Bit(argv[2]) + ".markers-off.png"),
+                    "capture axis markers hidden");
+            // A selected model without supports enables the placement button.
+            viewport.SetAxisMarkersVisible(true);
+            viewport.SetModelSelected(infos[0].id, true);
+            const glm::vec2 place_hover =
+                ToolbarButtonCenter(layout, ViewToolbar::kPlaceOnPlateButton);
+            io.AddMousePosEvent(place_hover.x, place_hover.y);
+            Require(viewport.RenderFrame() && viewport.RenderFrame(),
+                    "placement enabled capture render");
+            QImage placement_enabled(width, height, QImage::Format_RGBA8888);
+            glReadBuffer(GL_FRONT);
+            glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
+                         placement_enabled.bits());
+            Require(placement_enabled.mirrored().save(
+                        QString::fromLocal8Bit(argv[2]) + ".placement-enabled.png"),
+                    "capture enabled placement");
+            // Generated supports disable the place-on-plate button.
+            io.AddMousePosEvent(-std::numeric_limits<float>::max(),
+                                -std::numeric_limits<float>::max());
+            viewport.SetAxisMarkersVisible(true);
+            Require(viewport.TransformModelTo(infos[0].id, {{0, 0, 0}, {1, 1, 1}, {0, 30, 0}},
+                                              TransformMode::Rotate),
+                    "tilt toolbar support fixture");
+            SceneViewport::SupportGenerateSummary summary;
+            bool cancelled = false;
+            QStringList issues;
+            QString support_error;
+            const auto progress = [](std::size_t, std::size_t) { return true; };
+            Require(viewport.GenerateSupportsForAll(progress, summary, cancelled, issues,
+                                                    support_error), qPrintable(support_error));
+            Require(viewport.HasGeneratedSupports() &&
+                    !viewport.CanPlaceSelectedModelsOnPlate(),
+                    "toolbar support fixture missing");
+            viewport.SetModelSelected(infos[0].id, true);
+            Require(viewport.RenderFrame() && viewport.RenderFrame(),
+                    "supports toolbar capture render");
+            QImage supports(width, height, QImage::Format_RGBA8888);
+            glReadBuffer(GL_FRONT);
+            glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, supports.bits());
+            Require(supports.mirrored().save(
+                        QString::fromLocal8Bit(argv[2]) + ".supports.png"),
+                    "capture disabled placement with supports");
+            // Supports on another model must not block a support-free selection.
+            std::string second_load_error;
+            glm::vec3 second_size;
+            Require(viewport.LoadStl(TEST_ASSET_DIR "/cube_30mm.stl", second_load_error,
+                                     second_size), "placement capture model");
+            const auto free_id = viewport.ModelInfos().back().id;
+            Require(viewport.MoveModelTo(free_id, {35, 25, 20}),
+                    "raise placement capture model");
+            viewport.ClearModelSelection();
+            viewport.SetModelSelected(free_id, true);
+            Require(viewport.CanPlaceSelectedModelsOnPlate(),
+                    "mixed placement capture state");
+            Require(viewport.RenderFrame() && viewport.RenderFrame(),
+                    "mixed placement capture render");
+            QImage mixed(width, height, QImage::Format_RGBA8888);
+            glReadBuffer(GL_FRONT);
+            glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, mixed.bits());
+            Require(mixed.mirrored().save(
+                        QString::fromLocal8Bit(argv[2]) + ".placement-with-other-supports.png"),
+                    "capture placement beside other supports");
             return 0;
         }
         if (capture_mode.startsWith(QStringLiteral("--capture-gizmo-")))
@@ -3110,8 +3686,9 @@ int main(int argc, char* argv[])
             Trigger(window, "redoAction");
             auto* dock = window.findChild<QDockWidget*>("stlModelDock");
             Require(dock->grab().save(QString::fromLocal8Bit(argv[2]) + ".dock.png"), "capture model names");
-            auto* list = window.findChild<QListWidget*>("stlModelList");
-            auto* name = list->itemWidget(list->item(0))->findChild<QLabel*>("modelRowName");
+            auto* list = window.findChild<QTreeWidget*>("stlModelList");
+            auto* name = list->itemWidget(list->topLevelItem(0), 0)
+                             ->findChild<QLabel*>("modelRowName");
             WithDialog([&](QDialog* dialog)
             {
                 Require(dialog->grab().save(QString::fromLocal8Bit(argv[2])), "capture rename dialog");

@@ -77,7 +77,13 @@ WelcomeDialog::WelcomeDialog(const QString& recent_projects_file)
     card->setObjectName(QStringLiteral("welcomeCard"));
     auto* card_layout = new QVBoxLayout(card);
     card_layout->setContentsMargins(36, 28, 36, 24);
-    card_layout->setSpacing(16);
+    card_layout->setSpacing(15);
+    auto* logo = new QLabel(card);
+    logo->setObjectName(QStringLiteral("welcomeLogo"));
+    logo->setAlignment(Qt::AlignCenter);
+    logo->setPixmap(QIcon(QStringLiteral(":/logo/slm_logo.png")).pixmap(QSize(96, 96)));
+    logo->setFixedHeight(96);
+    card_layout->addWidget(logo);
     auto* title = new QLabel(QStringLiteral("欢迎使用 openSLMSlicer"), card);
     title->setObjectName(QStringLiteral("welcomeTitle"));
     title->setAlignment(Qt::AlignCenter);

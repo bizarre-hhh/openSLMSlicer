@@ -1,0 +1,19 @@
+{
+  "version": "12.3.0",
+  "files": [
+    {
+      "source": "src/libImaging/Draw.c",
+      "sha256": "c3b3f68ccb894d9eab5806f19dc9162cbf95d57f740c991129622b1ed13a3824",
+      "url": "https://github.com/python-pillow/Pillow/blob/12.3.0/src/libImaging/Draw.c"
+    },
+    {
+      "source": "LICENSE",
+      "sha256": "15181e7363dca9aed78b79bebebc7fde7f1814b8bd311ea3b87ae8ccadfc185b",
+      "url": "https://github.com/python-pillow/Pillow/blob/12.3.0/LICENSE"
+    }
+  ],
+  "archive": {
+    "url": "https://files.pythonhosted.org/packages/1c/3d/bb7fca845737cf9d7dbde16ed1843984665ff2e0a518f5db43e77ec540b9/pillow-12.3.0.tar.gz",
+    "sha256": "3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce"
+  }
+}

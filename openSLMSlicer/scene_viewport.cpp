@@ -34,10 +34,18 @@
 #include "shader.h"
 #include "stl_model.h"
 #include "view_cube.h"
+#include "view_toolbar.h"
 
 namespace
 {
 constexpr float kPlateContactToleranceMm = 1.0e-4f;
+
+// Ctrl is read from Win32 because the GLFW window is embedded in Qt and does
+// not reliably own the keyboard focus; the camera controller polls the same way.
+bool IsControlKeyDown()
+{
+    return (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+}
 
 void GlfwErrorCallback(int error, const char* description)
 {
@@ -299,6 +307,7 @@ bool SceneViewport::Initialize()
         return false;
     }
     base_plate_ = std::make_unique<BasePlate>(plate_size_mm_);
+    base_plate_->SetMarkersVisible(axis_markers_visible_);
 
     // Bounds share the plate's unlit position/color shader and one line buffer.
     glGenVertexArrays(1, &bounds_vao_);
@@ -400,7 +409,7 @@ void SceneViewport::DrawSettings()
         ImVec2(420.0f, 220.0f), ImVec2(FLT_MAX, FLT_MAX));
     ImGui::Begin("Scene Settings");
     ImGui::Text("GLFW + OpenGL + Dear ImGui + Assimp");
-    ImGui::Text("RMB: orbit | MMB: pan | Wheel: zoom | Home: reset");
+    ImGui::Text("LMB: select (Ctrl adds) | RMB: orbit | MMB: pan | Wheel: zoom | Home: reset");
     ImGui::Separator();
     Camera& camera = camera_controller_.GetCamera();
     int projection_mode = camera.IsOrthographic() ? 1 : 0;
@@ -627,14 +636,17 @@ void SceneViewport::UploadSupportMesh()
     // support_types.h), so translation in X/Y moves supports without a rebuild.
     std::size_t triangle_count = 0;
     for (const SupportGroup& group : support_entries_)
-        if (group.state == SupportState::Generated)
+        if (group.state == SupportState::Generated && group.visible)
             triangle_count += group.local_triangles.size();
     std::vector<float> vertices;
     vertices.reserve(triangle_count * 18);
     const glm::vec3 color(0.10f, 0.62f, 0.52f);
     for (const SupportGroup& group : support_entries_)
     {
-        if (group.state != SupportState::Generated || group.local_triangles.empty())
+        // Per-support visibility is display-only: hidden groups are omitted from
+        // the mesh buffer but still sliced and exported.
+        if (group.state != SupportState::Generated || !group.visible ||
+            group.local_triangles.empty())
             continue;
         const ModelEntry* owner = FindModel(group.owner_model_id);
         if (owner == nullptr)
@@ -753,6 +765,10 @@ bool SceneViewport::RenderFrame()
     const ViewCube::Layout cube_layout = ViewCube::GetLayout(
         glm::vec2(io.DisplaySize.x, io.DisplaySize.y), dpi_scale);
     const bool over_cube = ViewCube::Contains(glm::vec2(io.MousePos.x, io.MousePos.y), cube_layout);
+    const ViewToolbar::Layout toolbar_layout = ViewToolbar::GetLayout(
+        glm::vec2(io.DisplaySize.x, io.DisplaySize.y), dpi_scale);
+    const bool over_toolbar = ViewToolbar::Contains(
+        glm::vec2(io.MousePos.x, io.MousePos.y), toolbar_layout);
     const auto pan_depth = [this](float x, float y) -> std::optional<float>
     {
         const Camera& camera = camera_controller_.GetCamera();
@@ -767,7 +783,8 @@ bool SceneViewport::RenderFrame()
         const float depth = glm::dot(*hit - camera.Position(), forward);
         return depth > 0.0f ? std::optional<float>(depth) : std::nullopt;
     };
-    camera_controller_.Update(window_, io.WantCaptureMouse || over_cube || model_drag_.has_value() || ImGuizmo::IsUsingAny(),
+    camera_controller_.Update(window_, io.WantCaptureMouse || over_cube || over_toolbar ||
+                                           model_drag_.has_value() || ImGuizmo::IsUsingAny(),
                               io.WantCaptureKeyboard || model_drag_.has_value() || ImGuizmo::IsUsingAny(),
                               pan_depth);
     if (show_demo_window_)
@@ -775,19 +792,36 @@ bool SceneViewport::RenderFrame()
     if (show_settings_)
         DrawSettings();
     ViewCube::Draw(camera_controller_, dpi_scale);
+    ViewToolbar::State toolbar_state;
+    toolbar_state.axis_markers_visible = axis_markers_visible_;
+    toolbar_state.can_place_on_plate = CanPlaceSelectedModelsOnPlate();
+    toolbar_state.selection_has_supports = SelectedModelHasSupports();
+    const ViewToolbar::Actions toolbar_actions = ViewToolbar::Draw(toolbar_state, dpi_scale);
+    if (toolbar_actions.place_on_plate)
+    {
+        QString error;
+        PlaceSelectedModelsOnPlate(error);
+    }
+    if (toolbar_actions.toggle_axis_markers)
+        SetAxisMarkersVisible(!axis_markers_visible_);
+    if (toolbar_actions.zoom_in)
+        ZoomIn();
+    if (toolbar_actions.zoom_out)
+        ZoomOut();
 
     const Camera& camera = camera_controller_.GetCamera();
     const float aspect = static_cast<float>(display_width) / display_height;
     const glm::mat4 projection = ProjectionMatrix(aspect);
     const glm::mat4 view = camera.GetViewMatrix();
     const bool over_gizmo =
-        models_hidden_ ? false : DrawModelGizmo(view, projection, over_cube);
+        models_hidden_ ? false : DrawModelGizmo(view, projection, over_cube || over_toolbar);
     if (pending_pick_)
     {
         const glm::vec2 position = *pending_pick_;
         pending_pick_.reset();
         if (!models_hidden_ && !IsTransformEditing() && !io.WantCaptureMouse &&
-            !over_gizmo && !ViewCube::Contains(position, cube_layout))
+            !over_gizmo && !ViewCube::Contains(position, cube_layout) &&
+            !ViewToolbar::Contains(position, toolbar_layout))
         {
             const auto ray = MouseRayAt(position);
             glm::vec3 hit_point(0.0f);
@@ -796,8 +830,11 @@ bool SceneViewport::RenderFrame()
             {
                 const ModelId id = hit->info.id;
                 const bool was_selected = hit->info.selected;
-                SetModelSelected(id, true);
-                if (was_selected && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+                // Plain click replaces the selection; Ctrl+click adds to it.
+                const bool add_to_selection = IsControlKeyDown();
+                SelectModelOnClick(id, add_to_selection);
+                if (!add_to_selection && was_selected &&
+                    ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
                     !ImGui::IsMouseDown(ImGuiMouseButton_Right) &&
                     !ImGui::IsMouseDown(ImGuiMouseButton_Middle))
                     BeginModelDrag(id, position, hit_point);
@@ -1027,6 +1064,30 @@ bool SceneViewport::PlaceSelectedModelsOnPlate(QString& error)
     return true;
 }
 
+bool SceneViewport::CanPlaceSelectedModelsOnPlate() const
+{
+    return !IsTransformEditing() && HasSelectedModel() && !SelectedModelHasSupports();
+}
+
+bool SceneViewport::HasSelectedModel() const
+{
+    return std::any_of(models_.begin(), models_.end(),
+                       [](const ModelEntry& entry) { return entry.info.selected; });
+}
+
+bool SceneViewport::SelectedModelHasSupports() const
+{
+    return std::any_of(models_.begin(), models_.end(),
+                       [this](const ModelEntry& entry)
+    {
+        if (!entry.info.selected)
+            return false;
+        const SupportGroup* group = FindSupportGroup(entry.info.id);
+        return group != nullptr && group->state == SupportState::Generated &&
+               !group->local_triangles.empty();
+    });
+}
+
 bool SceneViewport::DuplicateSelectedModels(QString& error)
 {
     return RepeatSelectedModels(1, 2, {5.0f, 5.0f}, true, error);
@@ -1250,6 +1311,21 @@ void SceneViewport::ClearModelSelection()
         ++model_state_revision_;
 }
 
+void SceneViewport::SelectModelOnClick(ModelId id, bool add_to_selection)
+{
+    if (IsTransformEditing())
+        return;
+    const auto* entry = FindModel(id);
+    if (!entry)
+        return;
+    // A plain click on another model replaces the selection. Clicking an
+    // already selected model keeps the group intact so a drag gesture can
+    // start on it, and Ctrl+click always adds instead of replacing.
+    if (!add_to_selection && !entry->info.selected)
+        ClearModelSelection();
+    SetModelSelected(id, true);
+}
+
 bool SceneViewport::MoveModelToIndexInternal(ModelId id, std::size_t index)
 {
     const auto found = std::find_if(models_.begin(), models_.end(),
@@ -1386,30 +1462,52 @@ bool SceneViewport::GenerateSupportsForAll(
             }
             else
             {
-                SupportGroup group;
-                group.id = next_support_id_++;
-                group.owner_model_id = info.id;
-                group.name = (info.name + QStringLiteral(" 支撑"))
-                    .toUtf8().toStdString();
-                group.overhang_angle_deg = kSupportOverhangAngleDeg;
-                group.state = output.state;
-                group.volume_mm3 = output.volume_mm3;
-                group.local_triangles = std::move(output.local_triangles);
-                // Keep the persisted state consistent: Generated always carries
-                // geometry, anything else is recorded as "no support needed".
-                if (group.state != SupportState::Generated ||
-                    group.local_triangles.empty())
+                // One independent group per detected support region, so the model
+                // list can show/hide each generated support separately.
+                const ModelTransform source_transform = entry.model->Transform();
+                const double source_z =
+                    static_cast<double>(info.world_position_mm.z);
+                std::size_t block_number = 0;
+                for (SupportGenerationBlock& block : output.blocks)
                 {
+                    if (block.local_triangles.empty() || !(block.volume_mm3 > 0.0))
+                        continue;
+                    ++block_number;
+                    SupportGroup group;
+                    group.id = next_support_id_++;
+                    group.owner_model_id = info.id;
+                    group.name = (info.name +
+                        QStringLiteral(" 支撑 %1").arg(block_number))
+                        .toUtf8().toStdString();
+                    group.overhang_angle_deg = kSupportOverhangAngleDeg;
+                    group.state = SupportState::Generated;
+                    group.volume_mm3 = block.volume_mm3;
+                    group.local_triangles = std::move(block.local_triangles);
+                    group.source_transform = source_transform;
+                    group.source_world_center_z_mm = source_z;
+                    group.visible = true;
+                    staged.push_back(std::move(group));
+                }
+                if (block_number > 0)
+                {
+                    ++summary.generated;
+                }
+                else
+                {
+                    // No support needed: keep a marker so a later one-click run
+                    // skips this model instead of recomputing it.
+                    SupportGroup group;
+                    group.id = next_support_id_++;
+                    group.owner_model_id = info.id;
+                    group.name = (info.name + QStringLiteral(" 支撑"))
+                        .toUtf8().toStdString();
+                    group.overhang_angle_deg = kSupportOverhangAngleDeg;
                     group.state = SupportState::NotNeeded;
-                    group.local_triangles.clear();
-                    group.volume_mm3 = 0.0;
+                    group.source_transform = source_transform;
+                    group.source_world_center_z_mm = source_z;
+                    staged.push_back(std::move(group));
                     ++summary.not_needed;
                 }
-                group.source_transform = entry.model->Transform();
-                group.source_world_center_z_mm =
-                    static_cast<double>(info.world_position_mm.z);
-                staged.push_back(std::move(group));
-                ++summary.generated;
             }
         }
         if (progress && !progress(completed, total))
@@ -1462,10 +1560,12 @@ std::vector<SceneViewport::SupportModelStatus> SceneViewport::SupportStatuses() 
     for (const SupportGroup& group : support_entries_)
     {
         SupportModelStatus status;
+        status.support_id = group.id;
         status.owner_model_id = group.owner_model_id;
         status.state = group.state;
         status.triangle_count = group.local_triangles.size();
         status.volume_mm3 = group.volume_mm3;
+        status.visible = group.visible;
         status.name = QString::fromUtf8(group.name.c_str());
         statuses.push_back(std::move(status));
     }
@@ -1486,6 +1586,41 @@ const SupportGroup* SceneViewport::FindSupportGroup(ModelId owner_model_id) cons
         support_entries_.end(), [owner_model_id](const SupportGroup& group)
         { return group.owner_model_id == owner_model_id; });
     return found == support_entries_.end() ? nullptr : &*found;
+}
+
+SupportGroup* SceneViewport::FindSupportGroupById(SupportId support_id)
+{
+    const auto found = std::find_if(support_entries_.begin(),
+        support_entries_.end(), [support_id](const SupportGroup& group)
+        { return group.id == support_id; });
+    return found == support_entries_.end() ? nullptr : &*found;
+}
+
+const SupportGroup* SceneViewport::FindSupportGroupById(SupportId support_id) const
+{
+    const auto found = std::find_if(support_entries_.begin(),
+        support_entries_.end(), [support_id](const SupportGroup& group)
+        { return group.id == support_id; });
+    return found == support_entries_.end() ? nullptr : &*found;
+}
+
+bool SceneViewport::SetSupportVisible(SupportId support_id, bool visible)
+{
+    SupportGroup* group = FindSupportGroupById(support_id);
+    if (group == nullptr || group->state != SupportState::Generated)
+        return false;
+    if (group->visible == visible)
+        return true;
+    // Display-only state: no document revision bump and no slice invalidation.
+    group->visible = visible;
+    support_mesh_dirty_ = true;
+    return true;
+}
+
+bool SceneViewport::SupportVisible(SupportId support_id) const
+{
+    const SupportGroup* group = FindSupportGroupById(support_id);
+    return group != nullptr && group->visible;
 }
 
 std::vector<SliceTriangle> SceneViewport::SupportWorldTrianglesFor(
@@ -2185,7 +2320,7 @@ bool SceneViewport::TransformModelFromGizmo(ModelId id, const glm::mat4& matrix,
     return TransformModelTo(id, transform, mode);
 }
 
-bool SceneViewport::DrawModelGizmo(const glm::mat4& view, const glm::mat4& projection, bool over_cube)
+bool SceneViewport::DrawModelGizmo(const glm::mat4& view, const glm::mat4& projection, bool over_overlay)
 {
     if (models_hidden_)
     {
@@ -2211,7 +2346,7 @@ bool SceneViewport::DrawModelGizmo(const glm::mat4& view, const glm::mat4& proje
     ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
     ImGuizmo::SetOrthographic(camera_controller_.GetCamera().IsOrthographic());
     ImGuizmo::SetGizmoSizeClipSpace(0.15f);
-    ImGuizmo::Enable(!over_cube && !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) &&
+    ImGuizmo::Enable(!over_overlay && !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) &&
                     !ImGui::IsMouseDown(ImGuiMouseButton_Right) && !ImGui::IsMouseDown(ImGuiMouseButton_Middle));
     const bool changed = ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(projection),
         operation, ImGuizmo::LOCAL, glm::value_ptr(matrix));
@@ -2977,6 +3112,23 @@ void SceneViewport::ResetView()
         camera_controller_.ResetView(static_cast<float>(width) / height);
 }
 
+void SceneViewport::SetAxisMarkersVisible(bool visible)
+{
+    axis_markers_visible_ = visible;
+    if (base_plate_)
+        base_plate_->SetMarkersVisible(visible);
+}
+
+void SceneViewport::ZoomIn()
+{
+    camera_controller_.OnScroll(ViewToolbar::kZoomWheelSteps);
+}
+
+void SceneViewport::ZoomOut()
+{
+    camera_controller_.OnScroll(-ViewToolbar::kZoomWheelSteps);
+}
+
 void SceneViewport::ResetProjectDisplay()
 {
     ClearSlicePreview();
@@ -3094,6 +3246,17 @@ bool SceneViewport::ApplyProject(const ProjectData& project, QString& error)
     support_entries_.clear();
     next_support_id_ = kSupportIdBase;
     support_entries_.reserve(project.supports.size());
+    // Rebuild per-model support numbering ("支撑 1", "支撑 2", ...) in the
+    // persisted record order; names are derived, never stored.
+    std::vector<std::pair<ModelId, std::size_t>> support_numbers;
+    const auto next_support_number = [&support_numbers](ModelId owner_id)
+    {
+        for (auto& entry : support_numbers)
+            if (entry.first == owner_id)
+                return ++entry.second;
+        support_numbers.emplace_back(owner_id, 1);
+        return std::size_t{1};
+    };
     for (const ProjectSupportRecord& record : project.supports)
     {
         if (record.owner_model_index >= models_.size())
@@ -3102,8 +3265,13 @@ bool SceneViewport::ApplyProject(const ProjectData& project, QString& error)
         SupportGroup group;
         group.id = next_support_id_++;
         group.owner_model_id = owner.info.id;
-        group.name = (owner.info.name + QStringLiteral(" 支撑"))
-            .toUtf8().toStdString();
+        if (record.state == SupportState::Generated)
+            group.name = (owner.info.name +
+                QStringLiteral(" 支撑 %1").arg(next_support_number(owner.info.id)))
+                .toUtf8().toStdString();
+        else
+            group.name = (owner.info.name + QStringLiteral(" 支撑"))
+                .toUtf8().toStdString();
         group.state = record.state;
         group.overhang_angle_deg = record.overhang_angle_deg;
         group.volume_mm3 = record.volume_mm3;
@@ -3111,6 +3279,7 @@ bool SceneViewport::ApplyProject(const ProjectData& project, QString& error)
         group.source_transform = owner.model->Transform();
         group.source_world_center_z_mm =
             static_cast<double>(owner.info.world_position_mm.z);
+        group.visible = true;
         support_entries_.push_back(std::move(group));
     }
     support_mesh_dirty_ = true;

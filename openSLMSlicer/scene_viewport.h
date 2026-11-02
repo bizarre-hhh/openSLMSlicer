@@ -100,10 +100,12 @@ public:
 
     struct SupportModelStatus
     {
+        SupportId support_id = 0;
         ModelId owner_model_id = 0;
         SupportState state = SupportState::None;
         std::size_t triangle_count = 0;
         double volume_mm3 = 0.0;
+        bool visible = true;
         QString name;
     };
 
@@ -131,6 +133,10 @@ public:
     bool DuplicateSelectedModels(QString& error);
     bool RenameModel(ModelId id, const QString& name, QString& error);
     bool PlaceSelectedModelsOnPlate(QString& error);
+    // False without a selected model, during a transform edit, or when a
+    // selected model already has generated supports: grounding would drop them.
+    // Supports on other, unselected models do not block placement.
+    bool CanPlaceSelectedModelsOnPlate() const;
     // Rows/columns include the originals; gaps are between the selected group's bounds.
     bool ArraySelectedModels(int rows, int columns, const glm::vec2& gap_mm, QString& error);
     // Numeric edits are one step; Begin/End merge an entire gizmo gesture.
@@ -178,6 +184,10 @@ public:
     void SetModelSelected(bool selected) { SetModelSelected(active_model_id_, selected); }
     void SetModelSelected(ModelId id, bool selected);
     void ClearModelSelection();
+    // Left-click selection in the viewport: a plain click on an unselected
+    // model replaces the selection, Ctrl+click adds to it. Clicking an already
+    // selected model keeps the current selection so it can be dragged.
+    void SelectModelOnClick(ModelId id, bool add_to_selection);
     // Moves a loaded model to a new 0-based position in the model list. The
     // list order is the user-defined slice order used by GenerateSlice().
     // Returns false only when the model does not exist.
@@ -186,7 +196,8 @@ public:
     void RemoveStl() { RemoveStl(active_model_id_); }
     void RemoveStl(ModelId id);
 
-    // ---- Automatic supports (one solid block support group per model) ----
+    // ---- Automatic supports (one solid block support group per generated
+    //      support region; a model may own several groups) ----
     // Generates supports for every model that has no support entry yet (models
     // that already have supports or a "no support needed" entry are skipped).
     // Returns false for fatal errors; per-model problems are appended to issues
@@ -202,6 +213,11 @@ public:
     bool HasGeneratedSupports() const;
     std::size_t SupportEntryCount() const { return support_entries_.size(); }
     std::vector<SupportModelStatus> SupportStatuses() const;
+    // Per-support display visibility. Like model visibility this is display
+    // state only: it neither dirties the document nor removes the support from
+    // slicing/export. Returns false for an unknown or non-generated support.
+    bool SetSupportVisible(SupportId support_id, bool visible);
+    bool SupportVisible(SupportId support_id) const;
     // Monotonic counter bumped whenever support documents change (generation,
     // deletion, project load/new). Used by the window's modified flag.
     std::uint64_t SupportStateRevision() const { return support_state_revision_; }
@@ -209,6 +225,14 @@ public:
     glm::vec3 PlateSizeMm() const { return plate_size_mm_; }
     bool SetPlateSizeMm(const glm::vec3& size_mm, QString& error);
     void ResetView();
+    // Square markers at the platform's maximum X, Y and Z coordinates. They
+    // are a view aid: hiding them changes neither the plate nor the axes.
+    void SetAxisMarkersVisible(bool visible);
+    bool AxisMarkersVisible() const { return axis_markers_visible_; }
+    // One view-toolbar zoom step (a few wheel notches), shared by the overlay
+    // buttons and callers that cannot synthesize mouse input (tests, hotkeys).
+    void ZoomIn();
+    void ZoomOut();
 
     // Slice preview: all models, current placement in mm.
     bool PrepareSlice(const SliceSettings& settings, SliceEstimate& estimate,
@@ -312,7 +336,7 @@ private:
     bool ApplyTransform(ModelEntry& entry, const ModelTransform& transform);
     bool ApplyTransforms(const std::vector<ModelTransformChange>& changes, bool forward);
     bool IsModelPositionAllowed(const glm::vec3& position_mm) const;
-    bool DrawModelGizmo(const glm::mat4& view, const glm::mat4& projection, bool over_cube);
+    bool DrawModelGizmo(const glm::mat4& view, const glm::mat4& projection, bool over_overlay);
     void RecordOperation(Operation operation);
     void AppendHistory(const QString& description);
     void ClearHistory();
@@ -352,6 +376,10 @@ private:
     // ---- Support helpers ----
     SupportGroup* FindSupportGroup(ModelId owner_model_id);
     const SupportGroup* FindSupportGroup(ModelId owner_model_id) const;
+    SupportGroup* FindSupportGroupById(SupportId support_id);
+    const SupportGroup* FindSupportGroupById(SupportId support_id) const;
+    bool HasSelectedModel() const;
+    bool SelectedModelHasSupports() const;
     std::vector<SliceTriangle> SupportWorldTrianglesFor(const SupportGroup& group) const;
     void DeleteSupportsForModel(ModelId owner_model_id);
     // Applies the edit policy: X/Y translation is allowed (geometry follows the
@@ -444,6 +472,7 @@ private:
     bool show_demo_window_ = false;
     bool show_settings_ = false;
     bool wireframe_ = false;
+    bool axis_markers_visible_ = true;
     float clear_color_[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 };
 

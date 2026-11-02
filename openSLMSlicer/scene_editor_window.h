@@ -25,6 +25,8 @@ class QPlainTextEdit;
 class QPushButton;
 class QSlider;
 class QSpinBox;
+class QTreeWidget;
+class QTreeWidgetItem;
 class SceneViewport;
 
 // Owns the Qt shell: menus, toolbar, model dock, status bar and render timer.
@@ -58,6 +60,7 @@ private:
     void DuplicateModels();
     void ArrayModels();
     void PlaceModelsOnPlate();
+    void UpdatePlaceOnPlateAction();
     void EditPlateSize();
     void GenerateSlice();
     void GenerateSupports();
@@ -108,7 +111,7 @@ private:
     QLabel* history_empty_label_ = nullptr;
     std::uint64_t last_history_revision_ = 0;
     QDockWidget* model_dock_ = nullptr;
-    QListWidget* model_list_ = nullptr;
+    QTreeWidget* model_list_ = nullptr;
     QLabel* model_count_label_ = nullptr;
     QLabel* empty_models_label_ = nullptr;
     QGroupBox* model_details_ = nullptr;
@@ -153,8 +156,9 @@ private:
     std::uint64_t last_slice_revision_ = 0;
     bool slice_had_preview_ = false;
     QString loaded_slice_path_;
-    std::unordered_map<std::uint64_t, QListWidgetItem*> model_items_;
+    std::unordered_map<std::uint64_t, QTreeWidgetItem*> model_items_;
     std::uint64_t last_model_state_revision_ = 0;
+    std::uint64_t last_support_state_revision_ = 0;
     std::uint64_t last_details_model_id_ = 0;
     std::uint64_t last_transform_revision_ = 0;
     bool ready_ = false;

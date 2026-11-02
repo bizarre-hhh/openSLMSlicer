@@ -40,6 +40,11 @@ public:
     }
     glm::vec3 AxisLengthsWorld() const { return AxisLengthsForSize(size_mm_); }
 
+    // Square markers at the platform's maximum X, Y and Z coordinates are a
+    // view aid only; they can be hidden without touching the plate or axes.
+    void SetMarkersVisible(bool visible) { markers_visible_ = visible; }
+    bool MarkersVisible() const { return markers_visible_; }
+
     // Reuse the same OpenGL buffers when changing the rectangular plate.
     void SetSize(const glm::vec3& size_mm)
     {
@@ -157,29 +162,32 @@ public:
         glDrawArrays(GL_LINES, 0, line_vertex_count_);
 
         // Draw the platform-extent markers last so they blend over the axes.
-        if (!viewed_from_below)
+        if (markers_visible_)
         {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDepthMask(GL_FALSE);
+            if (!viewed_from_below)
+            {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glDepthMask(GL_FALSE);
+            }
+            shader.setFloat("zOffset", 0.0f);
+            shader.setFloat("alpha", 0.7f);
+            const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+            glBindVertexArray(marker_vao_);
+            const GLsizei vertices_per_marker = marker_vertex_count_ / 3;
+            // A marker follows its axis: hidden when the axis points at the eye
+            // in an orthographic view. The thickness keeps edge-on markers of
+            // visible axes readable.
+            for (int axis = 0; axis < 3; ++axis)
+                if (camera.IsAxisVisible(axis_directions[axis]))
+                    glDrawArrays(GL_TRIANGLES, axis * vertices_per_marker,
+                                 vertices_per_marker);
+            glBindVertexArray(0);
+            if (!cull_was_enabled)
+                glDisable(GL_CULL_FACE);
         }
-        shader.setFloat("zOffset", 0.0f);
-        shader.setFloat("alpha", 0.7f);
-        const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
-        glBindVertexArray(marker_vao_);
-        const GLsizei vertices_per_marker = marker_vertex_count_ / 3;
-        // A marker follows its axis: hidden when the axis points at the eye
-        // in an orthographic view. The thickness keeps edge-on markers of
-        // visible axes readable.
-        for (int axis = 0; axis < 3; ++axis)
-            if (camera.IsAxisVisible(axis_directions[axis]))
-                glDrawArrays(GL_TRIANGLES, axis * vertices_per_marker,
-                             vertices_per_marker);
-        glBindVertexArray(0);
-        if (!cull_was_enabled)
-            glDisable(GL_CULL_FACE);
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
     }
@@ -379,6 +387,7 @@ private:
     }
 
     glm::vec3 size_mm_ = PlateDimensions::DefaultSizeMm();
+    bool markers_visible_ = true;
     GLuint face_vao_ = 0;
     GLuint face_vbo_ = 0;
     GLuint line_vao_ = 0;

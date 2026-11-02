@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/scipy/scipy",
+  "commit": "e4e854eaa8f18d807cd3496028e257e36caa93cc",
+  "files": {
+    "scipy/optimize/src/minpack.c": "5042bbfbca1bcdd1ae52f29b0ccab889b191dca8c2880c65e884f005189a22e9",
+    "scipy/optimize/src/minpack.h": "ce81823cf63d62274b34a1c7f564b8ee490b1b96ebffb058536beb211d0f20cb",
+    "LICENSE.txt": "221e59f5e910fd7f94e44f0dac77436a11338c285c6346232e4a850a50da0e94"
+  }
+}
