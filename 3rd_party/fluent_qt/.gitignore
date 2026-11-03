@@ -1,0 +1,51 @@
+# Vs workspace files
+*.vs
+
+# binary files
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv*/
+.pytest_cache/
+*.egg-info/
+.coverage
+coverage.xml
+htmlcov/
+
+# CMake tooling
+compile_commands.json
+
+# custom user files
+*.user
+CMakeUserPresets.json
+.vscode/settings.json
+.qtcreator/
+/.claude/
+
+# mac
+.DS_Store
+
+# codex
+tmp/
+
+# Upstream font inputs are prepared in build/font-sources, not vendored here.
+# tools/dev/fluent_qt_repository_size.py rejects tracked files matching this file.
+/third_party/fonts/**/*.ttf
+/third_party/fonts/**/*.otf
+/third_party/icons/**/FluentSystemIcons-Regular.*
+
+# Generated website output: CI builds and deploys it with tools/site/build_site.py.
+# site/api/catalog.json stays tracked as the source catalog for quality tools.
+/site/index.html
+/site/zh-CN/index.html
+/site/sitemap.xml
+/site/fuel/
+/site/api/**/index.html
+/site/zh-CN/api/
+/site/assets/app-icon-64.png
+/site/assets/component-previews/
+/site/assets/app-icon.png
+/site/assets/gallery-home.jpg
+/site/assets/gallery/gallery-hero-real.png

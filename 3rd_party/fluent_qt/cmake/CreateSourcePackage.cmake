@@ -1,0 +1,128 @@
+if(NOT DEFINED FLUENT_QT_SOURCE_DIR)
+    message(FATAL_ERROR "FLUENT_QT_SOURCE_DIR is required")
+endif()
+if(NOT DEFINED FLUENT_QT_SOURCE_PACKAGE_DIR)
+    message(FATAL_ERROR "FLUENT_QT_SOURCE_PACKAGE_DIR is required")
+endif()
+if(NOT DEFINED FLUENT_QT_SOURCE_PACKAGE_VERSION)
+    message(FATAL_ERROR "FLUENT_QT_SOURCE_PACKAGE_VERSION is required")
+endif()
+
+get_filename_component(FLUENT_QT_SOURCE_DIR "${FLUENT_QT_SOURCE_DIR}" ABSOLUTE)
+get_filename_component(FLUENT_QT_SOURCE_PACKAGE_DIR
+    "${FLUENT_QT_SOURCE_PACKAGE_DIR}" ABSOLUTE)
+
+set(_package_name "FluentQt-${FLUENT_QT_SOURCE_PACKAGE_VERSION}-source")
+set(_staging_root "${FLUENT_QT_SOURCE_PACKAGE_DIR}/.source-package")
+set(_package_root "${_staging_root}/${_package_name}")
+set(_archive "${FLUENT_QT_SOURCE_PACKAGE_DIR}/${_package_name}.zip")
+
+file(MAKE_DIRECTORY "${FLUENT_QT_SOURCE_PACKAGE_DIR}")
+file(REMOVE_RECURSE "${_staging_root}")
+file(MAKE_DIRECTORY "${_package_root}/cmake")
+file(MAKE_DIRECTORY "${_package_root}/docs")
+file(MAKE_DIRECTORY "${_package_root}/examples")
+file(MAKE_DIRECTORY "${_package_root}/tools")
+file(MAKE_DIRECTORY "${_package_root}/.agents/skills")
+file(MAKE_DIRECTORY "${_package_root}/.github/scripts")
+
+file(COPY
+    "${FLUENT_QT_SOURCE_DIR}/include"
+    "${FLUENT_QT_SOURCE_DIR}/src"
+    "${FLUENT_QT_SOURCE_DIR}/res"
+    "${FLUENT_QT_SOURCE_DIR}/bindings"
+    "${FLUENT_QT_SOURCE_DIR}/platforms"
+    "${FLUENT_QT_SOURCE_DIR}/uilib"
+    "${FLUENT_QT_SOURCE_DIR}/plugin"
+    DESTINATION "${_package_root}"
+    PATTERN "gallery" EXCLUDE
+    PATTERN "__pycache__" EXCLUDE
+    PATTERN "*.pyc" EXCLUDE
+    PATTERN "*.pyo" EXCLUDE)
+# Keep licenses/provenance while excluding maintainer inputs even if an older
+# checkout or local experiment left copies beside the metadata.
+file(COPY "${FLUENT_QT_SOURCE_DIR}/third_party" DESTINATION "${_package_root}"
+    PATTERN "*.ttf" EXCLUDE
+    PATTERN "*.otf" EXCLUDE
+    PATTERN "FluentSystemIcons-Regular.json" EXCLUDE)
+file(COPY "${FLUENT_QT_SOURCE_DIR}/support/spatial" DESTINATION "${_package_root}/support")
+file(COPY
+    "${FLUENT_QT_SOURCE_DIR}/.github/scripts/setup-shiboken-clang.py"
+    DESTINATION "${_package_root}/.github/scripts")
+file(COPY
+    "${FLUENT_QT_SOURCE_DIR}/tools/fonts"
+    DESTINATION "${_package_root}/tools"
+    PATTERN "__pycache__" EXCLUDE
+    PATTERN "*.pyc" EXCLUDE
+    PATTERN "*.pyo" EXCLUDE)
+file(COPY
+    "${FLUENT_QT_SOURCE_DIR}/tools/onboarding"
+    DESTINATION "${_package_root}/tools"
+    PATTERN "__pycache__" EXCLUDE
+    PATTERN "*.pyc" EXCLUDE
+    PATTERN "*.pyo" EXCLUDE)
+file(COPY
+    "${FLUENT_QT_SOURCE_DIR}/tools/ai/query_ai_catalog.py"
+    "${FLUENT_QT_SOURCE_DIR}/tools/ai/evaluate_ai_catalog.py"
+    "${FLUENT_QT_SOURCE_DIR}/tools/ai/package_fluentqt_skill.py"
+    DESTINATION "${_package_root}/tools/ai")
+file(COPY
+    "${FLUENT_QT_SOURCE_DIR}/docs/ai"
+    DESTINATION "${_package_root}/docs")
+file(COPY
+    "${FLUENT_QT_SOURCE_DIR}/.agents/skills/build-fluentqt-gui"
+    DESTINATION "${_package_root}/.agents/skills"
+    PATTERN "__pycache__" EXCLUDE
+    PATTERN "*.pyc" EXCLUDE
+    PATTERN "*.pyo" EXCLUDE)
+file(COPY
+    "${FLUENT_QT_SOURCE_DIR}/CMakeLists.txt"
+    "${FLUENT_QT_SOURCE_DIR}/resources.qrc"
+    "${FLUENT_QT_SOURCE_DIR}/llms.txt"
+    "${FLUENT_QT_SOURCE_DIR}/LICENSE"
+    "${FLUENT_QT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+    "${FLUENT_QT_SOURCE_DIR}/TRADEMARKS.md"
+    DESTINATION "${_package_root}")
+file(COPY
+    "${FLUENT_QT_SOURCE_DIR}/cmake/FluentQtApplePlatformDependencies.cmake"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/FluentQtConfig.cmake.in"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/FluentQtInstallHeaders.cmake"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/FluentQtSpatial.cmake"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/FluentQtPlugins.cmake"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/FluentQtParticles.cmake"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/FluentQtQmlBridge.cmake"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/FluentQtHelloWorldExamples.cmake"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/FluentQtPluginExtensionExample.cmake"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/FluentQtQmlBridgeExample.cmake"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/FluentQtSanitizers.cmake"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/FluentQtTargetOptions.cmake"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/FluentQtRuntime.cmake"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/CreateSourcePackage.cmake"
+    "${FLUENT_QT_SOURCE_DIR}/cmake/SourcePackageREADME.md"
+    DESTINATION "${_package_root}/cmake")
+file(COPY
+    "${FLUENT_QT_SOURCE_DIR}/examples/hello_world"
+    "${FLUENT_QT_SOURCE_DIR}/examples/plugin_extension"
+    "${FLUENT_QT_SOURCE_DIR}/examples/qml_bridge"
+    DESTINATION "${_package_root}/examples")
+configure_file(
+    "${FLUENT_QT_SOURCE_DIR}/cmake/SourcePackageREADME.md"
+    "${_package_root}/README.md"
+    COPYONLY)
+# Directory copies read the working tree, so drop Finder metadata that Git ignores.
+file(GLOB_RECURSE _finder_metadata LIST_DIRECTORIES false "${_package_root}/.DS_Store")
+if(_finder_metadata)
+    file(REMOVE ${_finder_metadata})
+endif()
+
+file(REMOVE "${_archive}")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar cf "${_archive}" --format=zip "${_package_name}"
+    WORKING_DIRECTORY "${_staging_root}"
+    RESULT_VARIABLE _archive_result)
+if(NOT _archive_result EQUAL 0)
+    message(FATAL_ERROR "Could not create ${_archive}")
+endif()
+
+file(REMOVE_RECURSE "${_staging_root}")
+message(STATUS "Created ${_archive}")

@@ -1,14 +1,21 @@
 #include "export_slice_dialog.h"
 
+#include "fluent_ui.h"
+
+#include "components/basicinput/Button.h"
+#include "components/basicinput/CheckBox.h"
+#include "components/basicinput/ComboBox.h"
+#include "components/textfields/Label.h"
+#include "components/textfields/LineEdit.h"
+#include "design/Spacing.h"
+#include "design/Typography.h"
+
 #include <QCheckBox>
 #include <QComboBox>
-#include <QDialogButtonBox>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFont>
 #include <QFormLayout>
-#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -16,14 +23,22 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QStringList>
 #include <QVariant>
 #include <QVBoxLayout>
+#include <QWidget>
 
 #include <cmath>
 
 namespace
 {
+// Fluent 控件别名：它们分别是 QCheckBox / QComboBox / QLineEdit / QLabel 的
+// 子类，测试按 Qt 基类查找控件的代码保持不变。
+using fluent::basicinput::CheckBox;
+using fluent::basicinput::ComboBox;
+using fluent::textfields::LineEdit;
+
 // Append the suffix of the selected format, or replace the suffix of any other
 // supported format. Other suffixes typed by the user are kept.
 QString EnsureFormatSuffix(const QString& path, SliceExportFormat format)
@@ -67,6 +82,12 @@ QString ThicknessText(double thickness_mm)
     }
     return QStringLiteral("%1 µm").arg(locale.toString(micrometers, 'f', 1));
 }
+
+// 卡片正文中的说明小字（Fluent Caption 排版角色 + 次要文本色）。
+QLabel* Caption(const QString& text, QWidget* parent)
+{
+    return FluentUi::MakeLabel(parent, text, FluentUi::TextRole::Caption, true);
+}
 } // namespace
 
 ExportSliceDialog::ExportSliceDialog(const SliceBuildSnapshot& snapshot,
@@ -78,8 +99,9 @@ ExportSliceDialog::ExportSliceDialog(const SliceBuildSnapshot& snapshot,
     setObjectName(QStringLiteral("exportSliceDialog"));
     setWindowTitle(QStringLiteral("导出切片文件"));
     setWindowFlag(Qt::WindowContextHelpButtonHint, false);
-    setFont(QFont(QStringLiteral("Microsoft YaHei"), 11));
-    setMinimumWidth(560);
+    // 对话框字体、Fluent 排版和控件外观由集成层统一设置。
+    FluentUi::PolishDialog(*this);
+    setMinimumWidth(640);
 
     part_count_ = snapshot.parts.size();
     for (const SlicePartInfo& part : snapshot.parts)
@@ -96,13 +118,38 @@ ExportSliceDialog::ExportSliceDialog(const SliceBuildSnapshot& snapshot,
     }
 
     QVBoxLayout* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(22, 20, 22, 20);
-    layout->setSpacing(14);
+    layout->setContentsMargins(Spacing::Large, 20, Spacing::Large, 20);
+    layout->setSpacing(Spacing::Gap::Loose);
 
-    QGroupBox* output_group = new QGroupBox(QStringLiteral("输出"), this);
-    output_group->setObjectName(QStringLiteral("exportOutputGroup"));
-    QFormLayout* output_form = new QFormLayout(output_group);
-    format_combo_ = new QComboBox(output_group);
+    // ---------- 标题区 ----------
+    QLabel* title = FluentUi::MakeLabel(this, QStringLiteral("导出切片文件"),
+                                        FluentUi::TextRole::Title);
+    title->setObjectName(QStringLiteral("exportTitleLabel"));
+    layout->addWidget(title);
+    QLabel* subtitle = FluentUi::MakeLabel(
+        this, QStringLiteral("选择输出格式与文件位置，选项和预览摘要会随格式自动调整。"),
+        FluentUi::TextRole::Caption, true);
+    subtitle->setObjectName(QStringLiteral("exportSubtitleLabel"));
+    subtitle->setWordWrap(true);
+    subtitle->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    layout->addWidget(subtitle);
+
+    // ---------- 输出 ----------
+    QVBoxLayout* output_body = nullptr;
+    QWidget* output_card = FluentUi::MakeSection(
+        this, QStringLiteral("输出"), &output_body);
+    output_card->setObjectName(QStringLiteral("exportOutputGroup"));
+
+    QFormLayout* output_form = new QFormLayout;
+    output_form->setContentsMargins(0, 0, 0, 0);
+    output_form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    output_form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
+    output_form->setHorizontalSpacing(Spacing::Standard);
+    output_form->setVerticalSpacing(Spacing::Medium);
+    output_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    output_form->setRowWrapPolicy(QFormLayout::DontWrapRows);
+
+    format_combo_ = new ComboBox(output_card);
     format_combo_->setObjectName(QStringLiteral("exportFormatCombo"));
     for (const IJobWriter* writer :
          SliceExportRegistry::Instance().Writers())
@@ -113,92 +160,123 @@ ExportSliceDialog::ExportSliceDialog(const SliceBuildSnapshot& snapshot,
     format_combo_->setToolTip(QStringLiteral(
         "M1 支持 .slmslice（无损内部容器）、CLI 2.0 ASCII（通用交换格式）"
         "以及 SVG/PNG/CSV（预览、报告与统计）"));
-    output_form->addRow(QStringLiteral("格式"), format_combo_);
+    format_combo_->setMinimumHeight(Spacing::ControlHeight::Standard);
+    output_form->addRow(Caption(QStringLiteral("格式"), output_card), format_combo_);
 
-    path_edit_ = new QLineEdit(output_group);
+    path_edit_ = new LineEdit(output_card);
     path_edit_->setObjectName(QStringLiteral("exportPathEdit"));
     path_edit_->setText(QDir::toNativeSeparators(initial_path));
     path_edit_->setClearButtonEnabled(true);
     path_edit_->setToolTip(QStringLiteral("导出文件的完整路径，可手动修改"));
-    browse_button_ = new QPushButton(QStringLiteral("浏览…"), output_group);
+    path_edit_->setMinimumHeight(Spacing::ControlHeight::Standard);
+    browse_button_ = FluentUi::MakeButton(
+        output_card, QStringLiteral("浏览…"), FluentUi::ButtonKind::Standard);
     browse_button_->setObjectName(QStringLiteral("exportBrowseButton"));
-    QHBoxLayout* path_row = new QHBoxLayout;
+    browse_button_->setMinimumWidth(96);
+    browse_button_->setMinimumHeight(Spacing::ControlHeight::Standard);
+    QWidget* path_row_widget = new QWidget(output_card);
+    QHBoxLayout* path_row = new QHBoxLayout(path_row_widget);
     path_row->setContentsMargins(0, 0, 0, 0);
+    path_row->setSpacing(Spacing::Gap::Normal);
     path_row->addWidget(path_edit_, 1);
     path_row->addWidget(browse_button_);
-    output_form->addRow(QStringLiteral("文件"), path_row);
-    layout->addWidget(output_group);
+    output_form->addRow(Caption(QStringLiteral("文件"), output_card), path_row_widget);
+    output_body->addLayout(output_form);
 
-    QGroupBox* options_group = new QGroupBox(QStringLiteral("选项"), this);
-    options_group->setObjectName(QStringLiteral("exportOptionsGroup"));
-    QVBoxLayout* options_layout = new QVBoxLayout(options_group);
-    include_empty_layers_check_ = new QCheckBox(
-        QStringLiteral("包含空层（.slmslice / CSV）"), options_group);
+    // 选中格式的说明文字，跟随格式切换更新（原 updater 逻辑不变）。
+    hint_label_ = new fluent::textfields::Label(output_card);
+    hint_label_->setObjectName(QStringLiteral("exportFormatHintLabel"));
+    hint_label_->setWordWrap(true);
+    hint_label_->setTextFormat(Qt::PlainText);
+    hint_label_->setFluentTypography(Typography::FontRole::Caption);
+    hint_label_->setTextColorRole(
+        fluent::textfields::Label::TextColorRole::Secondary);
+    hint_label_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    output_body->addWidget(hint_label_);
+    layout->addWidget(output_card);
+
+    // ---------- 选项 ----------
+    QVBoxLayout* options_body = nullptr;
+    QWidget* options_card = FluentUi::MakeSection(
+        this, QStringLiteral("选项"), &options_body);
+    options_card->setObjectName(QStringLiteral("exportOptionsGroup"));
+
+    include_empty_layers_check_ = new CheckBox(
+        QStringLiteral("包含空层（.slmslice / CSV）"), options_card);
     include_empty_layers_check_->setObjectName(
         QStringLiteral("exportIncludeEmptyLayersCheck"));
     include_empty_layers_check_->setChecked(true);
-    options_layout->addWidget(include_empty_layers_check_);
+    options_body->addWidget(include_empty_layers_check_);
 
     include_hatches_check_ =
-        new QCheckBox(QStringLiteral("包含填充"), options_group);
+        new CheckBox(QStringLiteral("包含填充"), options_card);
     include_hatches_check_->setObjectName(
         QStringLiteral("exportIncludeHatchesCheck"));
     include_hatches_check_->setChecked(true);
     include_hatches_check_->setToolTip(
         hatch_count_ == 0 ? QStringLiteral("当前预览没有填充线")
                           : QStringLiteral("把预览中的填充线写入文件"));
-    options_layout->addWidget(include_hatches_check_);
+    options_body->addWidget(include_hatches_check_);
 
     validate_check_ =
-        new QCheckBox(QStringLiteral("导出后校验"), options_group);
+        new CheckBox(QStringLiteral("导出后校验"), options_card);
     validate_check_->setObjectName(QStringLiteral("exportValidateCheck"));
     validate_check_->setChecked(true);
     validate_check_->setToolTip(
         QStringLiteral("写入后回读文件，校验层数、轮廓数、填充数和路径长度"));
-    options_layout->addWidget(validate_check_);
+    options_body->addWidget(validate_check_);
 
     open_folder_check_ =
-        new QCheckBox(QStringLiteral("完成后打开文件夹"), options_group);
+        new CheckBox(QStringLiteral("完成后打开文件夹"), options_card);
     open_folder_check_->setObjectName(QStringLiteral("exportOpenFolderCheck"));
     open_folder_check_->setChecked(true);
     open_folder_check_->setToolTip(
         QStringLiteral("导出成功后用资源管理器打开输出目录"));
-    options_layout->addWidget(open_folder_check_);
-    layout->addWidget(options_group);
+    options_body->addWidget(open_folder_check_);
+    layout->addWidget(options_card);
 
-    QGroupBox* summary_group = new QGroupBox(QStringLiteral("预览摘要"), this);
-    summary_group->setObjectName(QStringLiteral("exportSummaryGroup"));
-    QVBoxLayout* summary_layout = new QVBoxLayout(summary_group);
-    summary_label_ = new QLabel(summary_group);
+    // ---------- 预览摘要 ----------
+    QVBoxLayout* summary_body = nullptr;
+    QWidget* summary_card = FluentUi::MakeSection(
+        this, QStringLiteral("预览摘要"), &summary_body);
+    summary_card->setObjectName(QStringLiteral("exportSummaryGroup"));
+    summary_label_ = new fluent::textfields::Label(summary_card);
     summary_label_->setObjectName(QStringLiteral("exportSummaryLabel"));
     summary_label_->setWordWrap(true);
     summary_label_->setTextFormat(Qt::PlainText);
-    summary_layout->addWidget(summary_label_);
-    layout->addWidget(summary_group);
+    summary_label_->setFluentTypography(Typography::FontRole::Body);
+    summary_label_->setTextColorRole(
+        fluent::textfields::Label::TextColorRole::Primary);
+    summary_label_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    summary_body->addWidget(summary_label_);
+    layout->addWidget(summary_card);
 
-    hint_label_ = new QLabel(this);
-    hint_label_->setObjectName(QStringLiteral("exportFormatHintLabel"));
-    hint_label_->setWordWrap(true);
-    hint_label_->setTextFormat(Qt::PlainText);
-    layout->addWidget(hint_label_);
-
-    QDialogButtonBox* buttons = new QDialogButtonBox(
-        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    buttons->setObjectName(QStringLiteral("exportButtonBox"));
-    if (QPushButton* accept_button = buttons->button(QDialogButtonBox::Ok))
-    {
-        accept_button->setObjectName(QStringLiteral("exportAcceptButton"));
-        accept_button->setText(QStringLiteral("确定"));
-        accept_button->setDefault(true);
-    }
-    if (QPushButton* cancel_button = buttons->button(QDialogButtonBox::Cancel))
-    {
-        cancel_button->setObjectName(QStringLiteral("exportCancelButton"));
-        cancel_button->setText(QStringLiteral("取消"));
-    }
-    connect(buttons, &QDialogButtonBox::accepted, this, &ExportSliceDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    layout->addWidget(buttons);
+    // ---------- 底部操作按钮 ----------
+    QWidget* footer = new QWidget(this);
+    footer->setObjectName(QStringLiteral("exportButtonBox"));
+    QHBoxLayout* footer_layout = new QHBoxLayout(footer);
+    footer_layout->setContentsMargins(0, 0, 0, 0);
+    footer_layout->setSpacing(Spacing::Gap::Normal);
+    footer_layout->addStretch(1);
+    auto* cancel_button = FluentUi::MakeButton(
+        footer, QStringLiteral("取消"), FluentUi::ButtonKind::Standard);
+    cancel_button->setObjectName(QStringLiteral("exportCancelButton"));
+    cancel_button->setMinimumWidth(96);
+    cancel_button->setMinimumHeight(Spacing::ControlHeight::Standard);
+    cancel_button->setAutoDefault(true);
+    footer_layout->addWidget(cancel_button);
+    auto* accept_button = FluentUi::MakeButton(
+        footer, QStringLiteral("确定"), FluentUi::ButtonKind::Accent);
+    accept_button->setObjectName(QStringLiteral("exportAcceptButton"));
+    accept_button->setMinimumWidth(96);
+    accept_button->setMinimumHeight(Spacing::ControlHeight::Standard);
+    accept_button->setAutoDefault(true);
+    accept_button->setDefault(true);
+    footer_layout->addWidget(accept_button);
+    layout->addWidget(footer);
+    connect(accept_button, &QPushButton::clicked, this,
+            &ExportSliceDialog::accept);
+    connect(cancel_button, &QPushButton::clicked, this, &QDialog::reject);
 
     connect(format_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) { SetFormat(Format()); });

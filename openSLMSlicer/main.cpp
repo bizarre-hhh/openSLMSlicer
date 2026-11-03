@@ -2,17 +2,22 @@
 #include <QIcon>
 #include <QMessageBox>
 
+#include "fluent_ui.h"
 #include "scene_editor_window.h"
 #include "scene_viewport.h"
 #include "welcome_dialog.h"
 
 int main(int argc, char* argv[])
 {
+    // Fluent-Qt 的 High-DPI 属性必须在 QApplication 构造前设置。
+    FluentUi::PrepareApplication();
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("openSLMSlicer"));
     app.setApplicationVersion(QStringLiteral("0.1.0"));
     // 品牌 logo：作为所有窗口（标题栏、任务栏、对话框）的默认图标。
     app.setWindowIcon(QIcon(QStringLiteral(":/logo/slm_logo.png")));
+    // Fluent 字体/资源、Fusion 基础样式、语义化调色板和原生控件样式表。
+    FluentUi::Initialize(app);
     WelcomeDialog welcome;
     while (welcome.exec() == QDialog::Accepted)
     {

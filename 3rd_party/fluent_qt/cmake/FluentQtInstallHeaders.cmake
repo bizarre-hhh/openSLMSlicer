@@ -1,0 +1,236 @@
+# Explicit allowlist for headers shipped in the FluentQt development package.
+# Keeping installation separate from the source-directory layout prevents a new
+# implementation header from becoming public merely because it was added under
+# src/. Paths are relative to the FluentQt source root.
+
+set(FLUENT_QT_INSTALL_HEADERS
+    include/FluentQt/BasicInput.h
+    include/FluentQt/Charts.h
+    include/FluentQt/Collections.h
+    include/FluentQt/DateTime.h
+    include/FluentQt/Design.h
+    include/FluentQt/Diagnostics.h
+    include/FluentQt/DialogsFlyouts.h
+    include/FluentQt/FluentQt.h
+    include/FluentQt/Foundation.h
+    include/FluentQt/Layout.h
+    include/FluentQt/MenusToolbars.h
+    include/FluentQt/Navigation.h
+    include/FluentQt/Plugins.h
+    include/FluentQt/QmlBridge.h
+    include/FluentQt/Scrolling.h
+    include/FluentQt/Spatial.h
+    include/FluentQt/StatusInfo.h
+    include/FluentQt/TextFields.h
+    include/FluentQt/Windowing.h
+    include/FluentQt/WebAssembly.h
+
+    src/compatibility/AccessibilityCompat.h
+    src/compatibility/ApplicationCompat.h
+    src/compatibility/EventConstructionCompat.h
+    src/compatibility/FontCompat.h
+    src/compatibility/InputEventCompat.h
+    src/compatibility/ObjectCompat.h
+    src/compatibility/PaintCompat.h
+    src/compatibility/QtFeatures.h
+    src/compatibility/WidgetCompat.h
+    src/compatibility/QtCompat.h
+    src/compatibility/TextPaintCompat.h
+    src/compatibility/WindowBackdropTypes.h
+    src/compatibility/WindowChromeCompat.h
+
+    src/components/basicinput/Button.h
+    src/components/basicinput/CheckBox.h
+    src/components/basicinput/ColorPicker.h
+    src/components/basicinput/ComboBox.h
+    src/components/basicinput/CompoundButton.h
+    src/components/basicinput/DropDownButton.h
+    src/components/basicinput/FileDropZone.h
+    src/components/basicinput/HyperlinkButton.h
+    src/components/basicinput/MultiSelectComboBox.h
+    src/components/basicinput/TreeSelect.h
+    src/components/basicinput/RadioButton.h
+    src/components/basicinput/RatingControl.h
+    src/components/basicinput/RepeatButton.h
+    src/components/basicinput/Slider.h
+    src/components/basicinput/SplitButton.h
+    src/components/basicinput/ToggleButton.h
+    src/components/basicinput/ToggleSplitButton.h
+    src/components/basicinput/ToggleSwitch.h
+
+    src/components/charts/ChartModel.h
+    src/components/charts/ChartView.h
+    src/components/charts/LineChart.h
+    src/components/charts/AreaChart.h
+    src/components/charts/BarChart.h
+    src/components/charts/HorizontalBarChart.h
+    src/components/charts/PieChart.h
+    src/components/charts/DonutChart.h
+    src/components/charts/ScatterChart.h
+    src/components/charts/Sparkline.h
+
+    src/components/collections/DataGrid.h
+    src/components/collections/DrawerView.h
+    src/components/collections/FileListView.h
+    src/components/collections/FlipView.h
+    src/components/collections/FlowView.h
+    src/components/collections/GridView.h
+    src/components/collections/ListView.h
+    src/components/collections/Timeline.h
+    src/components/collections/SelectionMode.h
+    src/components/collections/SplitView.h
+    src/components/collections/StackView.h
+    src/components/collections/TreeView.h
+
+    src/components/date_time/CalendarDatePicker.h
+    src/components/date_time/CalendarView.h
+    src/components/date_time/DatePicker.h
+    src/components/date_time/DateTimeRangePicker.h
+    src/components/date_time/TimePicker.h
+
+    src/components/dialogs_flyouts/CoachMark.h
+    src/components/dialogs_flyouts/ContentDialog.h
+    src/components/dialogs_flyouts/Dialog.h
+    src/components/dialogs_flyouts/Flyout.h
+    src/components/dialogs_flyouts/Popup.h
+    src/components/dialogs_flyouts/TeachingTip.h
+
+    src/components/foundation/FluentElement.h
+    src/components/foundation/FontIcon.h
+    src/components/foundation/MotionPolicy.h
+    src/components/foundation/QMLPlus.h
+    src/components/foundation/ThemeRegistry.h
+    src/components/foundation/UserTheme.h
+    src/components/foundation/WidgetOwnership.h
+    src/components/foundation/FormController.h
+    src/components/foundation/plugins/Plugin.h
+    src/components/foundation/plugins/PluginContext.h
+    src/components/foundation/plugins/PluginManager.h
+    src/components/foundation/plugins/WidgetPlugin.h
+    src/components/foundation/plugins/WidgetPluginInterface.h
+    src/components/foundation/overlay/OverlayGeometry.h
+    src/components/foundation/overlay/OverlayLightDismiss.h
+    src/components/foundation/overlay/OverlayPresentation.h
+    src/components/foundation/overlay/OverlayScrim.h
+    src/components/foundation/overlay/OverlayShadow.h
+    src/components/foundation/overlay/OverlayWindow.h
+
+    src/components/layout/Accordion.h
+    src/components/layout/Card.h
+    src/components/layout/DataGridToolBar.h
+    src/components/layout/Divider.h
+    src/components/layout/Expander.h
+    src/components/layout/Field.h
+    src/components/layout/PropertyPanel.h
+    src/components/layout/ListDetailView.h
+    include/FluentQt/Particles.h
+    src/components/particles/ParticleBackdrop.h
+    src/components/particles/ParticlesPlugin.h
+    src/components/particles/ParticlesSession.h
+
+    src/components/menus_toolbars/CommandBar.h
+    src/components/menus_toolbars/CommandBarFlyout.h
+    src/components/menus_toolbars/CommandPalette.h
+    src/components/menus_toolbars/Menu.h
+    src/components/menus_toolbars/MenuBar.h
+
+    src/components/navigation/Breadcrumb.h
+    src/components/navigation/NavigationView.h
+    src/components/navigation/Pivot.h
+    src/components/navigation/SelectorBar.h
+    src/components/navigation/Stepper.h
+    src/components/navigation/StackContentHost.h
+    src/components/navigation/TabView.h
+
+    src/components/qmlbridge/QmlPlugin.h
+    src/components/qmlbridge/QmlSession.h
+    src/components/qmlbridge/QmlTheme.h
+    src/components/qmlbridge/QmlTextureLayer.h
+    src/components/qmlbridge/QmlView.h
+
+    src/components/scrolling/AnnotatedScrollBar.h
+    src/components/scrolling/PipsPager.h
+    src/components/scrolling/ScrollBar.h
+    src/components/scrolling/ScrollView.h
+
+    src/components/spatial/ParticleLayer.h
+    src/components/spatial/SpatialRuntime.h
+    src/components/spatial/SpatialPlugin.h
+    src/components/spatial/SpatialSession.h
+    src/components/spatial/SpatialItem.h
+    src/components/spatial/SpatialView.h
+    src/components/status_info/Avatar.h
+    src/components/status_info/InfoBadge.h
+    src/components/status_info/InfoBar.h
+    src/components/status_info/ProgressBar.h
+    src/components/status_info/ProgressRing.h
+    src/components/status_info/Shimmer.h
+    src/components/status_info/SplashScreen.h
+    src/components/status_info/Toast.h
+    src/components/status_info/ToolTip.h
+
+    src/components/textfields/AutoSuggestBox.h
+    src/components/textfields/TagInput.h
+    src/components/textfields/CodeBlock.h
+    src/components/textfields/EditingCommandRouter.h
+    src/components/textfields/Label.h
+    src/components/textfields/LineEdit.h
+    src/components/textfields/NumberBox.h
+    src/components/textfields/PasswordBox.h
+    src/components/textfields/TextEdit.h
+
+    src/components/windowing/TitleBar.h
+    src/components/windowing/Window.h
+    src/components/windowing/WindowBackdrop.h
+    src/components/windowing/WindowBackdropMaterial.h
+
+    src/design/Animation.h
+    src/design/Breakpoints.h
+    src/design/CornerRadius.h
+    src/design/Elevation.h
+    src/design/IconCatalog.h
+    src/design/Material.h
+    src/design/Spacing.h
+    src/design/ThemeColors.h
+    src/design/Typography.h
+
+    src/utils/Inspector.h
+
+)
+
+function(fluent_qt_install_headers source_root)
+    foreach(_header IN LISTS FLUENT_QT_INSTALL_HEADERS)
+        if(NOT FLUENT_QT_BUILD_PARTICLES AND
+           (_header MATCHES "^src/components/particles/" OR _header STREQUAL "include/FluentQt/Particles.h"))
+            continue()
+        endif()
+        if(NOT FLUENT_QT_BUILD_PLUGINS AND
+           (_header MATCHES "^src/components/foundation/plugins/" OR _header STREQUAL "include/FluentQt/Plugins.h"))
+            continue()
+        endif()
+        if(NOT FLUENT_QT_BUILD_SPATIAL AND
+           (_header MATCHES "^src/components/spatial/" OR _header STREQUAL "include/FluentQt/Spatial.h"))
+            continue()
+        endif()
+        if(NOT FLUENT_QT_BUILD_QML_BRIDGE AND
+           (_header MATCHES "^src/components/qmlbridge/" OR _header STREQUAL "include/FluentQt/QmlBridge.h"))
+            continue()
+        endif()
+        if(_header MATCHES "^include/FluentQt/(.+)$")
+            set(_relative_path "${CMAKE_MATCH_1}")
+        elseif(_header MATCHES "^src/(.+)$")
+            set(_relative_path "${CMAKE_MATCH_1}")
+        else()
+            message(FATAL_ERROR "Unsupported FluentQt install header path: ${_header}")
+        endif()
+
+        get_filename_component(_relative_directory "${_relative_path}" DIRECTORY)
+        set(_destination "${CMAKE_INSTALL_INCLUDEDIR}/FluentQt")
+        if(_relative_directory)
+            string(APPEND _destination "/${_relative_directory}")
+        endif()
+        install(FILES "${source_root}/${_header}"
+            DESTINATION "${_destination}"
+            COMPONENT Development)
+    endforeach()
+endfunction()

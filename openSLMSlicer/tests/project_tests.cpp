@@ -50,6 +50,7 @@
 
 #include "imgui.h"
 #include "ImGuizmo.h"
+#include "fluent_ui.h"
 #include "project_file.h"
 #include "recent_projects.h"
 #include "scene_editor_window.h"
@@ -3361,8 +3362,12 @@ int main(int argc, char* argv[])
 {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
+    // 和 main.cpp 相同的 Fluent 启动顺序：High-DPI 属性在 QApplication 前设置，
+    // 字体/资源/样式表在 QApplication 之后安装，保证测试与真实程序外观一致。
+    FluentUi::PrepareApplication();
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication app(argc, argv);
+    FluentUi::Initialize(app);
     app.setQuitOnLastWindowClosed(false);
     QTemporaryDir directory;
     Require(directory.isValid(), "create test directory");
@@ -3386,7 +3391,8 @@ int main(int argc, char* argv[])
         return 0;
     }
     const QString capture_mode = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QString();
-    if (argc == 3 && (capture_mode == QStringLiteral("--capture-history") ||
+    if (argc == 3 && (capture_mode == QStringLiteral("--capture-window") ||
+                     capture_mode == QStringLiteral("--capture-history") ||
                      capture_mode == QStringLiteral("--capture-toolbar") ||
                      capture_mode == QStringLiteral("--capture-platform") ||
                      capture_mode == QStringLiteral("--capture-rename") ||
@@ -3548,7 +3554,16 @@ int main(int argc, char* argv[])
         viewport.SetModelSelected(infos[0].id, true);
         SceneEditorWindow window(viewport);
         Require(window.IsReady(), "preview native wrapper");
-        if (capture_mode == QStringLiteral("--capture-toolbar"))
+        if (capture_mode == QStringLiteral("--capture-window"))
+        {
+            // 整窗截图：菜单栏、工具栏、两个停靠面板和状态栏，用于 Fluent 美化验收。
+            window.resize(1600, 1000);
+            window.show();
+            app.processEvents();
+            app.processEvents();
+            Require(window.grab().save(QString::fromLocal8Bit(argv[2])), "capture window");
+        }
+        else if (capture_mode == QStringLiteral("--capture-toolbar"))
         {
             window.show();
             app.processEvents();

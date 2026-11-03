@@ -9,9 +9,13 @@
 
 class QCheckBox;
 class QComboBox;
-class QLabel;
 class QLineEdit;
 class QPushButton;
+
+namespace fluent::textfields
+{
+class Label;
+}
 
 // Collects the M1 slice export format, target path and options. The dialog only
 // edits options; SceneEditorWindow runs ExportSliceBuild() after accept() and
@@ -46,8 +50,8 @@ private:
     QCheckBox* include_hatches_check_ = nullptr;
     QCheckBox* validate_check_ = nullptr;
     QCheckBox* open_folder_check_ = nullptr;
-    QLabel* summary_label_ = nullptr;
-    QLabel* hint_label_ = nullptr;
+    fluent::textfields::Label* summary_label_ = nullptr;
+    fluent::textfields::Label* hint_label_ = nullptr;
     std::size_t part_count_ = 0;
     std::size_t support_part_count_ = 0;
     std::size_t layer_count_ = 0;

@@ -1,0 +1,67 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Metadata is descriptive. An application chooses explicitly whether to adopt it.
+set(FluentQt_DEBUG_RELEASE_RUNTIME "@FLUENT_QT_DEBUG_RELEASE_RUNTIME@")
+set(FluentQt_MSVC_RUNTIME_LIBRARY "@FLUENT_QT_SDK_MSVC_RUNTIME_LIBRARY@")
+include("${CMAKE_CURRENT_LIST_DIR}/FluentQtRuntime.cmake")
+
+find_dependency(Qt@QT_VERSION_MAJOR@ COMPONENTS Widgets)
+
+if(APPLE)
+    include("${CMAKE_CURRENT_LIST_DIR}/FluentQtApplePlatformDependencies.cmake")
+endif()
+
+if(@FLUENT_QT_BUILD_WEBASSEMBLY_SUPPORT@ AND EMSCRIPTEN)
+    include("${CMAKE_CURRENT_LIST_DIR}/FluentQtWasmAccessibility.cmake")
+    fluent_qt_configure_wasm_accessibility_overlay(
+        "${CMAKE_CURRENT_LIST_DIR}/wasm-accessibility/qt_accessibility_overlay.py"
+        "${CMAKE_CURRENT_LIST_DIR}/wasm-accessibility/data"
+        "${CMAKE_CURRENT_LIST_DIR}/wasm-accessibility/build-project")
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/FluentQtTargets.cmake")
+
+# Optional rendering dependencies are discovered only for requested components.
+foreach(_fluent_component IN LISTS FluentQt_FIND_COMPONENTS)
+    set(FluentQt_${_fluent_component}_FOUND FALSE)
+    if(_fluent_component STREQUAL "Plugins" AND @FLUENT_QT_BUILD_PLUGINS@)
+        include("${CMAKE_CURRENT_LIST_DIR}/FluentQtPluginsTargets.cmake")
+        set(FluentQt_Plugins_FOUND TRUE)
+    endif()
+    if(_fluent_component STREQUAL "Particles" AND @FLUENT_QT_BUILD_PARTICLES@)
+        include("${CMAKE_CURRENT_LIST_DIR}/FluentQtPluginsTargets.cmake")
+        include("${CMAKE_CURRENT_LIST_DIR}/FluentQtParticlesTargets.cmake")
+        set(FluentQt_Particles_FOUND TRUE)
+    endif()
+    if(_fluent_component STREQUAL "Spatial" AND @FLUENT_QT_BUILD_SPATIAL@)
+        if(@QT_VERSION_MAJOR@ EQUAL 6)
+            find_package(Qt6 QUIET COMPONENTS OpenGLWidgets)
+        endif()
+        if(@QT_VERSION_MAJOR@ EQUAL 5 OR TARGET Qt6::OpenGLWidgets)
+            include("${CMAKE_CURRENT_LIST_DIR}/FluentQtPluginsTargets.cmake")
+            include("${CMAKE_CURRENT_LIST_DIR}/FluentQtParticlesTargets.cmake")
+            include("${CMAKE_CURRENT_LIST_DIR}/FluentQtSpatialTargets.cmake")
+            set(FluentQt_Spatial_FOUND TRUE)
+        endif()
+    endif()
+    if(_fluent_component STREQUAL "QmlBridge" AND @FLUENT_QT_BUILD_QML_BRIDGE@)
+        find_package(Qt@QT_VERSION_MAJOR@ QUIET COMPONENTS Qml Quick QuickWidgets)
+        if(@QT_VERSION_MAJOR@ EQUAL 6)
+            find_package(Qt6 QUIET COMPONENTS OpenGL)
+        endif()
+        if(TARGET Qt@QT_VERSION_MAJOR@::Qml AND
+           TARGET Qt@QT_VERSION_MAJOR@::Quick AND
+           TARGET Qt@QT_VERSION_MAJOR@::QuickWidgets AND
+           (@QT_VERSION_MAJOR@ EQUAL 5 OR TARGET Qt6::OpenGL))
+            include("${CMAKE_CURRENT_LIST_DIR}/FluentQtPluginsTargets.cmake")
+            include("${CMAKE_CURRENT_LIST_DIR}/FluentQtQmlBridgeTargets.cmake")
+            set(FluentQt_QmlBridge_FOUND TRUE)
+        endif()
+    endif()
+    if(NOT FluentQt_${_fluent_component}_FOUND AND FluentQt_FIND_REQUIRED_${_fluent_component})
+        set(FluentQt_NOT_FOUND_MESSAGE "Requested FluentQt component ${_fluent_component} is not installed or its Qt dependencies are unavailable.")
+    endif()
+endforeach()
+check_required_components(FluentQt)

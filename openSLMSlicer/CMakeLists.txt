@@ -17,6 +17,41 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Svg)
 qt_standard_project_setup()
 set(CMAKE_AUTORCC ON)
 
+# Fluent-Qt：Fluent 风格 Qt Widgets 组件库（仓库内 3rd_party/fluent_qt 静态库）。
+# 只给 Qt 界面和控件做美化，GLFW/ImGui 的 3D 视口不经过它。
+# 该副本针对本工程的 Qt 5.14.2 打了 3 处兼容补丁，见 FLUENTQT_VENDOR.md。
+set(FLUENTQT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../3rd_party/fluent_qt"
+  CACHE PATH "Fluent-Qt 源码目录（包含 CMakeLists.txt）")
+if (NOT EXISTS "${FLUENTQT_SOURCE_DIR}/CMakeLists.txt")
+  message(FATAL_ERROR
+    "Fluent-Qt 源码不存在：${FLUENTQT_SOURCE_DIR}。"
+    "请确认 3rd_party/fluent_qt 或 -DFLUENTQT_SOURCE_DIR=<path> 指向完整源码树。")
+endif()
+# 只编译核心 Widgets 组件库；示例、Gallery、测试、插件和安装规则都不需要。
+foreach(_fluentqt_option
+    FLUENT_QT_BUILD_TESTS
+    FLUENT_QT_BUILD_GALLERY
+    FLUENT_QT_BUILD_EXAMPLES
+    FLUENT_QT_BUILD_PARTICLES
+    FLUENT_QT_BUILD_PLUGINS
+    FLUENT_QT_BUILD_SPATIAL
+    FLUENT_QT_BUILD_QML_BRIDGE
+    FLUENT_QT_BUILD_PYSIDE6_BINDINGS
+    FLUENT_QT_BUILD_WEBASSEMBLY_SUPPORT
+    FLUENT_QT_INSTALL
+    FLUENT_QT_ENABLE_GALLERY_PACKAGING
+    FLUENT_QT_ENABLE_SANITIZERS)
+  set(${_fluentqt_option} OFF CACHE BOOL "" FORCE)
+endforeach()
+# 第三方库的严格警告（/W4 /WX）不影响本工程编译。
+set(FLUENT_QT_ENABLE_WARNINGS OFF CACHE BOOL "" FORCE)
+add_subdirectory("${FLUENTQT_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/fluentqt-build")
+# 第三方库不需要 EditAndContinue：Debug 下用普通 PDB，和 PySLM 的处理一致。
+if (POLICY CMP0141)
+  set_target_properties(FluentQt PROPERTIES
+    MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>")
+endif()
+
 # GLFW and Dear ImGui remain the renderer inside the Qt central widget.
 set(GLFW_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../3rd_party/glfw")
 set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../3rd_party/imgui")
@@ -169,6 +204,7 @@ set(PROJECT_SOURCES
   "${LOGO_DIR}/logo.qrc"
   "${IMGUIZMO_DIR}/ImGuizmo.cpp"
   "main.cpp"
+  "fluent_ui.cpp"
   "project_file.cpp"
   "recent_projects.cpp"
   "welcome_dialog.cpp"
@@ -235,6 +271,7 @@ target_link_libraries(openSLMSlicer PRIVATE
   imm32
   assimp_prebuilt
   pyslm_cpp
+  FluentQt::FluentQt
   Qt${QT_VERSION_MAJOR}::Widgets
   Qt${QT_VERSION_MAJOR}::Svg
 )

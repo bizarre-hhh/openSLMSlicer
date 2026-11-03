@@ -19,6 +19,7 @@ class QCloseEvent;
 class QDockWidget;
 class QGroupBox;
 class QLabel;
+class QLineEdit;
 class QListWidget;
 class QListWidgetItem;
 class QPlainTextEdit;
@@ -116,7 +117,7 @@ private:
     QLabel* empty_models_label_ = nullptr;
     QGroupBox* model_details_ = nullptr;
     QLabel* model_name_label_ = nullptr;
-    QPlainTextEdit* model_path_edit_ = nullptr;
+    QLineEdit* model_path_edit_ = nullptr;
     QLabel* model_file_size_label_ = nullptr;
     QLabel* model_triangles_label_ = nullptr;
     QLabel* model_size_x_label_ = nullptr;

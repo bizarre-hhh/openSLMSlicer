@@ -59,7 +59,10 @@
 #include <cmath>
 #include <limits>
 
+#include <FluentQt/FluentQt.h>
+
 #include "export_slice_dialog.h"
+#include "fluent_ui.h"
 #include "model_names.h"
 #include "scene_viewport.h"
 #include "slice_file_info_dialog.h"
@@ -225,6 +228,10 @@ SceneEditorWindow::SceneEditorWindow(SceneViewport& viewport, const QString& pro
     setWindowTitle(QStringLiteral("openSLMSlicer"));
     resize(SceneViewport::kInitialWidth, SceneViewport::kInitialHeight);
 
+    // Fluent 菜单栏/状态栏/停靠面板外观。GLFW 视口仍是中央控件，不参与美化。
+    FluentUi::InstallMenuBar(*this);
+    FluentUi::PolishMainWindow(*this);
+
     QWindow* glfw_window = QWindow::fromWinId(
         reinterpret_cast<WId>(viewport_.NativeHandle()));
     if (glfw_window == nullptr)
@@ -248,7 +255,7 @@ SceneEditorWindow::SceneEditorWindow(SceneViewport& viewport, const QString& pro
         UpdateProjectState();
     });
 
-    QMenu* file_menu = menuBar()->addMenu(QStringLiteral("文件(&F)"));
+    QMenu* file_menu = FluentUi::CreateMenu(*menuBar(), QStringLiteral("文件(&F)"));
     QAction* new_project_action = file_menu->addAction(QStringLiteral("新建工程(&N)"));
     new_project_action->setObjectName(QStringLiteral("newProjectAction"));
     new_project_action->setShortcut(QKeySequence::New);
@@ -287,7 +294,7 @@ SceneEditorWindow::SceneEditorWindow(SceneViewport& viewport, const QString& pro
     QAction* quit_action = file_menu->addAction(QStringLiteral("退出(&X)"));
     connect(quit_action, &QAction::triggered, this, [this]() { close(); });
 
-    QMenu* edit_menu = menuBar()->addMenu(QStringLiteral("编辑(&E)"));
+    QMenu* edit_menu = FluentUi::CreateMenu(*menuBar(), QStringLiteral("编辑(&E)"));
     duplicate_action_ = edit_menu->addAction(QStringLiteral("复制模型"));
     duplicate_action_->setObjectName(QStringLiteral("duplicateModelsAction"));
     duplicate_action_->setIcon(QIcon(QStringLiteral(":/icons/duplicate-model.svg")));
@@ -329,7 +336,7 @@ SceneEditorWindow::SceneEditorWindow(SceneViewport& viewport, const QString& pro
     history_action->setIcon(QIcon(QStringLiteral(":/icons/rotate-ccw-clock.svg")));
     connect(history_action, &QAction::triggered, this, &SceneEditorWindow::ShowOperationHistory);
 
-    QMenu* slice_menu = menuBar()->addMenu(QStringLiteral("切片(&S)"));
+    QMenu* slice_menu = FluentUi::CreateMenu(*menuBar(), QStringLiteral("切片(&S)"));
     slice_action_ = slice_menu->addAction(QStringLiteral("生成切片…"));
     slice_action_->setObjectName(QStringLiteral("generateSliceAction"));
     slice_action_->setIcon(QIcon(QStringLiteral(":/icons/slice.svg")));
@@ -368,7 +375,7 @@ SceneEditorWindow::SceneEditorWindow(SceneViewport& viewport, const QString& pro
     connect(slice_file_info_action_, &QAction::triggered,
             this, &SceneEditorWindow::ShowSliceFileInfo);
 
-    QMenu* support_menu = menuBar()->addMenu(QStringLiteral("支撑(&U)"));
+    QMenu* support_menu = FluentUi::CreateMenu(*menuBar(), QStringLiteral("支撑(&U)"));
     generate_support_action_ = support_menu->addAction(QStringLiteral("一键生成支撑"));
     generate_support_action_->setObjectName(QStringLiteral("generateSupportAction"));
     generate_support_action_->setIcon(QIcon(QStringLiteral(":/icons/support.svg")));
@@ -395,7 +402,7 @@ SceneEditorWindow::SceneEditorWindow(SceneViewport& viewport, const QString& pro
     connect(supports_visible_action_, &QAction::toggled, this,
             [this](bool checked) { viewport_.SetSupportsVisible(checked); });
 
-    QMenu* view_menu = menuBar()->addMenu(QStringLiteral("视图(&V)"));
+    QMenu* view_menu = FluentUi::CreateMenu(*menuBar(), QStringLiteral("视图(&V)"));
 
     QAction* reset_action = view_menu->addAction(QStringLiteral("重置视角"));
     reset_action->setObjectName(QStringLiteral("resetViewAction"));
@@ -424,9 +431,8 @@ SceneEditorWindow::SceneEditorWindow(SceneViewport& viewport, const QString& pro
     toolbar->setAllowedAreas(Qt::TopToolBarArea);
     toolbar->setMovable(false);
     toolbar->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
-    toolbar->setIconSize(QSize(32, 32));
-    toolbar->setStyleSheet(QStringLiteral(
-        "QToolBar#mainToolBar QToolButton { min-width: 64px; padding: 6px 8px; }"));
+    toolbar->setIconSize(QSize(26, 26));
+    // 工具栏外观（悬停/按下/禁用/分隔符）由 FluentUi 的全局样式表统一提供。
     addToolBar(Qt::TopToolBarArea, toolbar);
     toolbar->addAction(new_project_action);
     toolbar->addAction(open_project_action);
@@ -664,19 +670,14 @@ void SceneEditorWindow::ArrayModels()
     QDialog dialog(this);
     dialog.setObjectName(QStringLiteral("modelArrayDialog"));
     dialog.setWindowTitle(QStringLiteral("矩形阵列"));
-    dialog.setWindowFlags(dialog.windowFlags() & ~Qt::WindowContextHelpButtonHint);
-    dialog.setFont(QFont(QStringLiteral("Microsoft YaHei"), 12));
     dialog.setMinimumWidth(640);
-    auto* layout = new QVBoxLayout(&dialog);
-    layout->setContentsMargins(24, 22, 24, 22);
-    layout->setSpacing(18);
-    auto* hint = new QLabel(QStringLiteral(
-        "行列数包含原模型，沿世界 X/Y 正方向展开。\n"
-        "多选模型作为一个单元重复排列，间隙按包围盒计算。"), &dialog);
-    hint->setWordWrap(true);
-    layout->addWidget(hint);
+    FluentUi::DialogParts parts = FluentUi::BuildDialog(
+        dialog, QStringLiteral("矩形阵列"),
+        QStringLiteral("行列数包含原模型，沿世界 X/Y 正方向展开。\n"
+                       "多选模型作为一个单元重复排列，间隙按包围盒计算。"),
+        QStringLiteral("生成阵列"), QStringLiteral("取消"));
     auto* form = new QFormLayout;
-    form->setVerticalSpacing(16);
+    form->setVerticalSpacing(12);
     auto* columns = new QSpinBox(&dialog);
     auto* rows = new QSpinBox(&dialog);
     columns->setObjectName(QStringLiteral("arrayColumnsSpinBox"));
@@ -704,16 +705,13 @@ void SceneEditorWindow::ArrayModels()
     form->addRow(QStringLiteral("行数（Y 方向）"), rows);
     form->addRow(QStringLiteral("X 方向间隙"), gap_x);
     form->addRow(QStringLiteral("Y 方向间隙"), gap_y);
-    layout->addLayout(form);
-    auto* summary = new QLabel(&dialog);
+    parts.body->addLayout(form);
+    auto* summary = FluentUi::MakeValueLabel(&dialog, QString(), FluentUi::TextRole::Caption, true);
     summary->setObjectName(QStringLiteral("arraySummaryLabel"));
     summary->setWordWrap(true);
-    layout->addWidget(summary);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    auto* generate = buttons->button(QDialogButtonBox::Ok);
-    generate->setText(QStringLiteral("生成阵列"));
+    parts.body->addWidget(summary);
+    QPushButton* generate = parts.primary;
     generate->setObjectName(QStringLiteral("generateModelArrayButton"));
-    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
     const auto update_summary = [=, this]()
     {
         const auto total = selected_count * rows->value() * columns->value();
@@ -739,9 +737,8 @@ void SceneEditorWindow::ArrayModels()
     connect(rows, qOverload<int>(&QSpinBox::valueChanged), &dialog, [=](int) { update_summary(); });
     connect(gap_x, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, [=](double) { update_summary(); });
     connect(gap_y, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, [=](double) { update_summary(); });
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(buttons);
+    connect(parts.primary, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(parts.secondary, &QPushButton::clicked, &dialog, &QDialog::reject);
     update_summary();
     if (dialog.exec() != QDialog::Accepted) return;
     QString error;
@@ -765,20 +762,13 @@ void SceneEditorWindow::EditPlateSize()
     QDialog dialog(this);
     dialog.setObjectName(QStringLiteral("plateSizeDialog"));
     dialog.setWindowTitle(QStringLiteral("修改平台尺寸"));
-    dialog.setWindowFlags(dialog.windowFlags() & ~Qt::WindowContextHelpButtonHint);
-    dialog.setFont(QFont(QStringLiteral("Microsoft YaHei"), 12));
     dialog.setMinimumWidth(480);
-    auto* layout = new QVBoxLayout(&dialog);
-    layout->setContentsMargins(24, 22, 24, 22);
-    layout->setSpacing(18);
-    auto* hint = new QLabel(
-        QStringLiteral("请输入平台尺寸（毫米）。高度（Z）只保存在工程中，"
-                       "不会在视口中显示。"),
-        &dialog);
-    hint->setWordWrap(true);
-    layout->addWidget(hint);
+    FluentUi::DialogParts parts = FluentUi::BuildDialog(
+        dialog, QStringLiteral("修改平台尺寸"),
+        QStringLiteral("请输入平台尺寸（毫米）。高度（Z）只保存在工程中，不会在视口中显示。"),
+        QStringLiteral("确定"), QStringLiteral("取消"));
     auto* form = new QFormLayout;
-    form->setVerticalSpacing(16);
+    form->setVerticalSpacing(12);
     auto* length = new QDoubleSpinBox(&dialog);
     auto* width = new QDoubleSpinBox(&dialog);
     auto* height = new QDoubleSpinBox(&dialog);
@@ -799,13 +789,9 @@ void SceneEditorWindow::EditPlateSize()
     form->addRow(QStringLiteral("长度（X 方向）"), length);
     form->addRow(QStringLiteral("宽度（Y 方向）"), width);
     form->addRow(QStringLiteral("高度（Z 方向）"), height);
-    layout->addLayout(form);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("确定"));
-    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(buttons);
+    parts.body->addLayout(form);
+    connect(parts.primary, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(parts.secondary, &QPushButton::clicked, &dialog, &QDialog::reject);
     if (dialog.exec() != QDialog::Accepted)
         return;
     QString error;
@@ -899,8 +885,14 @@ void SceneEditorWindow::ShowOperationHistory()
         history_dialog_->resize(760, 460);
         history_dialog_->setMinimumSize(480, 280);
         auto* layout = new QVBoxLayout(history_dialog_);
-        layout->addWidget(new QLabel(QStringLiteral("最近的操作显示在最上方"), history_dialog_));
-        history_empty_label_ = new QLabel(QStringLiteral("当前工程暂无操作记录。"), history_dialog_);
+        layout->setContentsMargins(20, 18, 20, 18);
+        layout->setSpacing(10);
+        layout->addWidget(FluentUi::MakeLabel(
+            history_dialog_, QStringLiteral("最近的操作显示在最上方"),
+            FluentUi::TextRole::Caption, true));
+        history_empty_label_ = FluentUi::MakeLabel(
+            history_dialog_, QStringLiteral("当前工程暂无操作记录。"),
+            FluentUi::TextRole::Caption, true);
         history_empty_label_->setObjectName(QStringLiteral("emptyOperationHistory"));
         layout->addWidget(history_empty_label_);
         history_list_ = new QListWidget(history_dialog_);
@@ -909,10 +901,15 @@ void SceneEditorWindow::ShowOperationHistory()
         history_list_->setSpacing(4);
         history_list_->setSelectionMode(QAbstractItemView::SingleSelection);
         layout->addWidget(history_list_, 1);
-        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, history_dialog_);
-        buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
-        connect(buttons, &QDialogButtonBox::rejected, history_dialog_, &QDialog::reject);
-        layout->addWidget(buttons);
+        QPushButton* close_button = FluentUi::MakeButton(
+            history_dialog_, QStringLiteral("关闭"), FluentUi::ButtonKind::Subtle);
+        close_button->setObjectName(QStringLiteral("closeHistoryButton"));
+        connect(close_button, &QPushButton::clicked, history_dialog_, &QDialog::reject);
+        auto* footer = new QHBoxLayout;
+        footer->setContentsMargins(0, 4, 0, 0);
+        footer->addStretch(1);
+        footer->addWidget(close_button);
+        layout->addLayout(footer);
         // Force the first fill even when the current history revision is zero.
         last_history_revision_ = viewport_.HistoryRevision() - 1;
     }
@@ -953,39 +950,48 @@ void SceneEditorWindow::EditModelTransform(TransformMode mode)
         transform_dialog_ = new QDialog(this, Qt::Window);
         transform_dialog_->setObjectName(QStringLiteral("modelTransformDialog"));
         transform_dialog_->setWindowFlag(Qt::WindowContextHelpButtonHint, false);
-        transform_dialog_->setFont(QFont(QStringLiteral("Microsoft YaHei"), 11));
         transform_dialog_->setMinimumWidth(440);
         auto* layout = new QVBoxLayout(transform_dialog_);
-        layout->setContentsMargins(22, 20, 22, 20);
-        layout->setSpacing(16);
-        auto* hint = new QLabel(QStringLiteral("输入参数后点击应用。\n也可拖动视图中的操纵器，参数会同步更新。"), transform_dialog_);
-        hint->setWordWrap(true);
-        layout->addWidget(hint);
+        layout->setContentsMargins(22, 18, 22, 18);
+        layout->setSpacing(12);
+        layout->addWidget(FluentUi::MakeLabel(
+            transform_dialog_,
+            QStringLiteral("输入参数后点击应用。\n也可拖动视图中的操纵器，参数会同步更新。"),
+            FluentUi::TextRole::Caption, true));
         auto* form = new QFormLayout;
-        form->setVerticalSpacing(12);
+        form->setVerticalSpacing(10);
         const QStringList axes{QStringLiteral("X"), QStringLiteral("Y"), QStringLiteral("Z")};
         for (int axis = 0; axis < 3; ++axis)
         {
             auto* field = new QDoubleSpinBox(transform_dialog_);
             field->setObjectName(QStringLiteral("modelTransform") + axes[axis]);
-            field->setMinimumHeight(34);
+            field->setMinimumHeight(32);
             field->setKeyboardTracking(false);
             form->addRow(axes[axis], field);
             transform_fields_[axis] = field;
         }
         layout->addLayout(form);
-        auto* note = new QLabel(transform_dialog_);
+        QLabel* note = FluentUi::MakeLabel(
+            transform_dialog_, QString(), FluentUi::TextRole::Caption, true);
         note->setObjectName(QStringLiteral("modelTransformNote"));
         note->setWordWrap(true);
         layout->addWidget(note);
-        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Apply | QDialogButtonBox::Close, transform_dialog_);
-        auto* apply = buttons->button(QDialogButtonBox::Apply);
+        QPushButton* apply = FluentUi::MakeButton(
+            transform_dialog_, QStringLiteral("应用"), FluentUi::ButtonKind::Accent);
         apply->setObjectName(QStringLiteral("applyModelTransformButton"));
-        apply->setText(QStringLiteral("应用"));
-        buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
+        apply->setDefault(true);
+        QPushButton* close_button = FluentUi::MakeButton(
+            transform_dialog_, QStringLiteral("关闭"), FluentUi::ButtonKind::Standard);
+        close_button->setObjectName(QStringLiteral("closeModelTransformButton"));
         connect(apply, &QPushButton::clicked, this, &SceneEditorWindow::ApplyModelTransformDialog);
-        connect(buttons, &QDialogButtonBox::rejected, transform_dialog_, &QDialog::reject);
-        layout->addWidget(buttons);
+        connect(close_button, &QPushButton::clicked, transform_dialog_, &QDialog::reject);
+        auto* footer = new QHBoxLayout;
+        footer->setContentsMargins(0, 4, 0, 0);
+        footer->setSpacing(8);
+        footer->addStretch(1);
+        footer->addWidget(close_button);
+        footer->addWidget(apply);
+        layout->addLayout(footer);
         // Closing does not apply values that have only been typed into the fields.
         connect(transform_dialog_, &QDialog::finished, this, [this]()
         {
@@ -1092,15 +1098,19 @@ void SceneEditorWindow::CreateModelDock()
     // Keep the dock in the main window beside the embedded native viewport.
     model_dock_->setFeatures(QDockWidget::DockWidgetClosable |
                              QDockWidget::DockWidgetMovable);
-    model_dock_->setMinimumWidth(480);
+    // 窄属性面板：默认宽度就是内容需要的宽度，模型列表和基本信息上下排列。
+    model_dock_->setMinimumWidth(460);
 
     QWidget* contents = new QWidget(model_dock_);
     QVBoxLayout* layout = new QVBoxLayout(contents);
-    model_count_label_ = new QLabel(contents);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->setSpacing(8);
+    model_count_label_ = FluentUi::MakeValueLabel(contents, QString(), FluentUi::TextRole::Strong);
     layout->addWidget(model_count_label_);
 
-    empty_models_label_ = new QLabel(
-        QStringLiteral("暂无已加载的 STL 模型。\n点击工具栏的“打开 STL”加载模型。"), contents);
+    empty_models_label_ = FluentUi::MakeLabel(
+        contents, QStringLiteral("暂无已加载的 STL 模型。\n点击工具栏的“打开 STL”加载模型。"),
+        FluentUi::TextRole::Caption, true);
     empty_models_label_->setWordWrap(true);
     layout->addWidget(empty_models_label_);
 
@@ -1131,32 +1141,34 @@ void SceneEditorWindow::CreateModelDock()
 
     model_details_ = new QGroupBox(QStringLiteral("基本信息"), contents);
     QFormLayout* details_layout = new QFormLayout(model_details_);
-    details_layout->setContentsMargins(10, 10, 10, 10);
-    details_layout->setVerticalSpacing(4);
+    details_layout->setContentsMargins(8, 10, 8, 8);
+    // 分组框的标题画在 QSS margin 里，行距太小会和上一行文字贴在一起。
+    details_layout->setVerticalSpacing(8);
     details_layout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     details_layout->setRowWrapPolicy(QFormLayout::WrapLongRows);
     auto add_detail = [this, details_layout](const QString& title,
                                            const QString& object_name, bool add_row = true)
     {
-        QLabel* label = new QLabel(model_details_);
+        QLabel* label = FluentUi::MakeValueLabel(model_details_, QString(), FluentUi::TextRole::Body);
         label->setObjectName(object_name);
         label->setTextFormat(Qt::PlainText);
         label->setTextInteractionFlags(Qt::TextSelectableByMouse);
         label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         label->setWordWrap(true);
+        // 空文本时也占一行高度：构造时 QGroupBox 的 sizeHint 会写进停靠面板的固定
+        // 高度，值标签之后才被填上文字；不预留行高会让表单在高度不足时挤在一起。
+        label->setMinimumHeight(QFontMetrics(label->font()).lineSpacing() + 4);
         if (add_row)
             details_layout->addRow(title, label);
         return label;
     };
     model_name_label_ = add_detail(QStringLiteral("模型名"), QStringLiteral("modelName"));
-    model_path_edit_ = new QPlainTextEdit(model_details_);
+    // 窄面板下用单行只读输入框显示路径：文本过长时横向滚动，而不是换成两行
+    // 把表单撑高（QPlainTextEdit 在窄宽度下会从 "D:" 处折行）。
+    model_path_edit_ = new QLineEdit(model_details_);
     model_path_edit_->setObjectName(QStringLiteral("modelPath"));
     model_path_edit_->setReadOnly(true);
-    model_path_edit_->setTabChangesFocus(true);
-    model_path_edit_->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-    model_path_edit_->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
     model_path_edit_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-    model_path_edit_->setFixedHeight(model_path_edit_->fontMetrics().lineSpacing() * 2 + 8);
     details_layout->addRow(QStringLiteral("路径"), model_path_edit_);
     model_file_size_label_ = add_detail(QStringLiteral("文件大小"), QStringLiteral("modelFileSize"));
     model_triangles_label_ = add_detail(QStringLiteral("三角面数"), QStringLiteral("modelTriangles"));
@@ -1179,13 +1191,17 @@ void SceneEditorWindow::CreateModelDock()
 
     QWidget* spatial_details = new QWidget(model_details_);
     QHBoxLayout* spatial_layout = new QHBoxLayout(spatial_details);
-    spatial_layout->setContentsMargins(0, 0, 0, 0);
+    spatial_layout->setContentsMargins(0, 4, 0, 0);
+    spatial_layout->setSpacing(4);
     auto create_vector_group = [spatial_details, spatial_layout, &axes](
         const QString& title, const QString& object_name)
     {
         QGroupBox* group = new QGroupBox(title, spatial_details);
         group->setObjectName(object_name);
         QGridLayout* grid = new QGridLayout(group);
+        // 窄面板：收紧网格内边距，否则两个分组框并排时会顶出横向滚动条。
+        grid->setContentsMargins(6, 4, 6, 4);
+        grid->setHorizontalSpacing(4);
         grid->setVerticalSpacing(4);
         for (int axis = 0; axis < 3; ++axis)
         {
@@ -1194,7 +1210,7 @@ void SceneEditorWindow::CreateModelDock()
             grid->addWidget(header, 0, axis + 1);
             grid->setColumnStretch(axis + 1, 1);
             grid->setColumnMinimumWidth(axis + 1,
-                header->fontMetrics().horizontalAdvance(QStringLiteral("-000.00")) + 4);
+                header->fontMetrics().horizontalAdvance(QStringLiteral("000.00")) + 2);
         }
         spatial_layout->addWidget(group, 1);
         return group;
@@ -1237,7 +1253,8 @@ void SceneEditorWindow::CreateModelDock()
     auto add_transform_button = [this, transform_group](int row, const QString& text,
                                                        const QString& name, TransformMode mode)
     {
-        auto* button = new QPushButton(text, transform_group);
+        auto* button = FluentUi::MakeButton(
+            transform_group, text, FluentUi::ButtonKind::Standard, FluentUi::ButtonScale::Small);
         button->setObjectName(name);
         button->setMinimumHeight(28);
         button->setToolTip(QStringLiteral("修改参数并启用对应的视图操纵器"));
@@ -1248,9 +1265,9 @@ void SceneEditorWindow::CreateModelDock()
         grid->addWidget(button, row, 0);
         connect(button, &QPushButton::clicked, this, [this, mode]() { EditModelTransform(mode); });
     };
-    add_transform_button(1, QStringLiteral("平移 mm"), QStringLiteral("modelTranslateButton"), TransformMode::Translate);
-    add_transform_button(2, QStringLiteral("缩放 倍"), QStringLiteral("modelScaleButton"), TransformMode::Scale);
-    add_transform_button(3, QStringLiteral("旋转 °"), QStringLiteral("modelRotateButton"), TransformMode::Rotate);
+    add_transform_button(1, QStringLiteral("平移"), QStringLiteral("modelTranslateButton"), TransformMode::Translate);
+    add_transform_button(2, QStringLiteral("缩放"), QStringLiteral("modelScaleButton"), TransformMode::Scale);
+    add_transform_button(3, QStringLiteral("旋转"), QStringLiteral("modelRotateButton"), TransformMode::Rotate);
     auto add_note = [](QGroupBox* group, const QString& text)
     {
         auto* grid = static_cast<QGridLayout*>(group->layout());
@@ -1293,7 +1310,8 @@ void SceneEditorWindow::CreateModelDock()
 
     model_dock_->setWidget(contents);
     addDockWidget(Qt::LeftDockWidgetArea, model_dock_);
-    resizeDocks({model_dock_}, {920}, Qt::Horizontal);
+    // 窄属性面板：把横向空间留给 3D 视口（原默认值 920 太宽）。
+    resizeDocks({model_dock_}, {480}, Qt::Horizontal);
     RefreshModelList();
 }
 
@@ -1309,29 +1327,33 @@ void SceneEditorWindow::CreateSliceDock()
     QWidget* contents = new QWidget(slice_dock_);
     QVBoxLayout* layout = new QVBoxLayout(contents);
     layout->setContentsMargins(12, 12, 12, 12);
-    layout->setSpacing(8);
+    layout->setSpacing(12);
 
-    QLabel* title = new QLabel(QStringLiteral("切片预览"), contents);
-    QFont title_font = title->font();
-    title_font.setBold(true);
-    title->setFont(title_font);
-    layout->addWidget(title);
+    layout->addWidget(FluentUi::MakeLabel(
+        contents, QStringLiteral("切片预览"), FluentUi::TextRole::Subtitle));
 
-    slice_layer_label_ = new QLabel(QStringLiteral("尚未生成切片。"), contents);
+    // 图层：当前层号 / Z 高度和层选择控件。
+    QVBoxLayout* layer_body = nullptr;
+    QWidget* layer_section = FluentUi::MakeSection(
+        contents, QStringLiteral("图层"), &layer_body);
+    slice_layer_label_ = FluentUi::MakeValueLabel(
+        contents, QStringLiteral("尚未生成切片。"), FluentUi::TextRole::Body);
     slice_layer_label_->setObjectName(QStringLiteral("sliceLayerLabel"));
     slice_layer_label_->setWordWrap(true);
     slice_layer_label_->setTextFormat(Qt::PlainText);
-    layout->addWidget(slice_layer_label_);
-
-    slice_z_label_ = new QLabel(
-        QStringLiteral("使用“切片 → 生成切片…”开始。"), contents);
+    layer_body->addWidget(slice_layer_label_);
+    slice_z_label_ = FluentUi::MakeValueLabel(
+        contents, QStringLiteral("使用“切片 → 生成切片…”开始。"),
+        FluentUi::TextRole::Caption, true);
     slice_z_label_->setObjectName(QStringLiteral("sliceZLabel"));
     slice_z_label_->setWordWrap(true);
     slice_z_label_->setTextFormat(Qt::PlainText);
-    layout->addWidget(slice_z_label_);
+    layer_body->addWidget(slice_z_label_);
 
     QHBoxLayout* layer_controls = new QHBoxLayout;
-    slice_slider_ = new QSlider(Qt::Horizontal, contents);
+    layer_controls->setContentsMargins(0, 4, 0, 0);
+    layer_controls->setSpacing(8);
+    slice_slider_ = new fluent::basicinput::Slider(Qt::Horizontal, contents);
     slice_slider_->setObjectName(QStringLiteral("sliceLayerSlider"));
     slice_slider_->setRange(1, 1);
     slice_slider_->setEnabled(false);
@@ -1342,119 +1364,93 @@ void SceneEditorWindow::CreateSliceDock()
     slice_layer_spin_->setEnabled(false);
     slice_layer_spin_->setFixedWidth(76);
     layer_controls->addWidget(slice_layer_spin_);
-    layout->addLayout(layer_controls);
+    layer_body->addLayout(layer_controls);
+    layout->addWidget(layer_section);
 
-    slice_contour_label_ = new QLabel(QString(), contents);
-    slice_contour_label_->setObjectName(QStringLiteral("sliceContourLabel"));
-    slice_contour_label_->setWordWrap(true);
-    slice_contour_label_->setTextFormat(Qt::PlainText);
-    layout->addWidget(slice_contour_label_);
+    // 统计：轮廓 / 填充 / 跳转 / 路径长度 / 支撑 / 填充参数。
+    QVBoxLayout* stats_body = nullptr;
+    QWidget* stats_section = FluentUi::MakeSection(
+        contents, QStringLiteral("统计"), &stats_body);
+    auto add_stat = [contents, stats_body](QLabel*& target, const QString& object_name,
+                                          const QString& text, const QString& tooltip = QString())
+    {
+        target = FluentUi::MakeValueLabel(contents, text, FluentUi::TextRole::Caption, true);
+        target->setObjectName(object_name);
+        target->setWordWrap(true);
+        target->setTextFormat(Qt::PlainText);
+        if (!tooltip.isEmpty())
+            target->setToolTip(tooltip);
+        stats_body->addWidget(target);
+    };
+    add_stat(slice_contour_label_, QStringLiteral("sliceContourLabel"), QString());
+    add_stat(slice_hatch_label_, QStringLiteral("sliceHatchLabel"), QString());
+    add_stat(slice_jump_label_, QStringLiteral("sliceJumpLabel"), QString());
+    add_stat(slice_total_label_, QStringLiteral("sliceTotalLabel"), QString());
+    add_stat(slice_support_label_, QStringLiteral("sliceSupportLabel"),
+             QStringLiteral("其中支撑：无"),
+             QStringLiteral("切片统计中的支撑部分（轮廓/填充条数与路径长度）"));
+    add_stat(slice_hatch_settings_label_, QStringLiteral("sliceHatchSettingsLabel"), QString());
+    layout->addWidget(stats_section);
 
-    slice_hatch_label_ = new QLabel(QString(), contents);
-    slice_hatch_label_->setObjectName(QStringLiteral("sliceHatchLabel"));
-    slice_hatch_label_->setWordWrap(true);
-    slice_hatch_label_->setTextFormat(Qt::PlainText);
-    layout->addWidget(slice_hatch_label_);
-
-    slice_jump_label_ = new QLabel(QString(), contents);
-    slice_jump_label_->setObjectName(QStringLiteral("sliceJumpLabel"));
-    slice_jump_label_->setWordWrap(true);
-    slice_jump_label_->setTextFormat(Qt::PlainText);
-    layout->addWidget(slice_jump_label_);
-
-    slice_total_label_ = new QLabel(QString(), contents);
-    slice_total_label_->setObjectName(QStringLiteral("sliceTotalLabel"));
-    slice_total_label_->setWordWrap(true);
-    slice_total_label_->setTextFormat(Qt::PlainText);
-    layout->addWidget(slice_total_label_);
-
-    slice_support_label_ = new QLabel(QStringLiteral("其中支撑：无"), contents);
-    slice_support_label_->setObjectName(QStringLiteral("sliceSupportLabel"));
-    slice_support_label_->setWordWrap(true);
-    slice_support_label_->setTextFormat(Qt::PlainText);
-    slice_support_label_->setToolTip(
-        QStringLiteral("切片统计中的支撑部分（轮廓/填充条数与路径长度）"));
-    layout->addWidget(slice_support_label_);
-
-    slice_hatch_settings_label_ = new QLabel(QString(), contents);
-    slice_hatch_settings_label_->setObjectName(
-        QStringLiteral("sliceHatchSettingsLabel"));
-    slice_hatch_settings_label_->setWordWrap(true);
-    slice_hatch_settings_label_->setTextFormat(Qt::PlainText);
-    layout->addWidget(slice_hatch_settings_label_);
-
-    slice_visible_check_ = new QCheckBox(QStringLiteral("显示切片"), contents);
-    slice_visible_check_->setObjectName(QStringLiteral("sliceVisibleCheck"));
-    slice_visible_check_->setChecked(true);
-    slice_visible_check_->setEnabled(false);
-    layout->addWidget(slice_visible_check_);
-
-    slice_contour_visible_check_ =
-        new QCheckBox(QStringLiteral("显示轮廓"), contents);
-    slice_contour_visible_check_->setObjectName(
-        QStringLiteral("sliceContourVisibleCheck"));
-    slice_contour_visible_check_->setChecked(true);
-    slice_contour_visible_check_->setEnabled(false);
-    layout->addWidget(slice_contour_visible_check_);
-
-    slice_hatch_visible_check_ =
-        new QCheckBox(QStringLiteral("显示填充"), contents);
-    slice_hatch_visible_check_->setObjectName(
-        QStringLiteral("sliceHatchVisibleCheck"));
-    slice_hatch_visible_check_->setChecked(true);
-    slice_hatch_visible_check_->setEnabled(false);
-    layout->addWidget(slice_hatch_visible_check_);
-
-    slice_direction_visible_check_ =
-        new QCheckBox(QStringLiteral("显示方向"), contents);
-    slice_direction_visible_check_->setObjectName(
-        QStringLiteral("sliceDirectionVisibleCheck"));
-    slice_direction_visible_check_->setChecked(false);
-    slice_direction_visible_check_->setEnabled(false);
-    slice_direction_visible_check_->setToolTip(
-        QStringLiteral("需要开启“显示填充”才能显示方向箭头"));
-    layout->addWidget(slice_direction_visible_check_);
-
-    slice_jump_visible_check_ =
-        new QCheckBox(QStringLiteral("显示跳转"), contents);
-    slice_jump_visible_check_->setObjectName(
-        QStringLiteral("sliceJumpVisibleCheck"));
-    slice_jump_visible_check_->setChecked(false);
-    slice_jump_visible_check_->setEnabled(false);
-    slice_jump_visible_check_->setToolTip(
-        QStringLiteral("显示相邻填充线之间的跳转（同一零件内及零件之间）"));
-    layout->addWidget(slice_jump_visible_check_);
-
-    slice_hide_models_check_ =
-        new QCheckBox(QStringLiteral("隐藏全部模型"), contents);
-    slice_hide_models_check_->setObjectName(
-        QStringLiteral("sliceHideModelsCheck"));
-    slice_hide_models_check_->setChecked(false);
-    slice_hide_models_check_->setEnabled(false);
-    slice_hide_models_check_->setToolTip(
-        QStringLiteral("只隐藏模型显示，不影响切片数据"));
-    layout->addWidget(slice_hide_models_check_);
+    // 显示开关：全部换成 Fluent CheckBox（QCheckBox 子类，按类型查找的测试不变）。
+    QVBoxLayout* display_body = nullptr;
+    QWidget* display_section = FluentUi::MakeSection(
+        contents, QStringLiteral("显示"), &display_body);
+    auto add_switch = [contents, display_body](QCheckBox*& target, const QString& text,
+                                              const QString& object_name, bool checked,
+                                              const QString& tooltip = QString())
+    {
+        auto* box = new fluent::basicinput::CheckBox(text, contents);
+        box->setObjectName(object_name);
+        box->setChecked(checked);
+        box->setEnabled(false);
+        if (!tooltip.isEmpty())
+            box->setToolTip(tooltip);
+        display_body->addWidget(box);
+        target = box;
+    };
+    add_switch(slice_visible_check_, QStringLiteral("显示切片"),
+               QStringLiteral("sliceVisibleCheck"), true);
+    add_switch(slice_contour_visible_check_, QStringLiteral("显示轮廓"),
+               QStringLiteral("sliceContourVisibleCheck"), true);
+    add_switch(slice_hatch_visible_check_, QStringLiteral("显示填充"),
+               QStringLiteral("sliceHatchVisibleCheck"), true);
+    add_switch(slice_direction_visible_check_, QStringLiteral("显示方向"),
+               QStringLiteral("sliceDirectionVisibleCheck"), false,
+               QStringLiteral("需要开启“显示填充”才能显示方向箭头"));
+    add_switch(slice_jump_visible_check_, QStringLiteral("显示跳转"),
+               QStringLiteral("sliceJumpVisibleCheck"), false,
+               QStringLiteral("显示相邻填充线之间的跳转（同一零件内及零件之间）"));
+    add_switch(slice_hide_models_check_, QStringLiteral("隐藏全部模型"),
+               QStringLiteral("sliceHideModelsCheck"), false,
+               QStringLiteral("只隐藏模型显示，不影响切片数据"));
+    layout->addWidget(display_section);
 
     QHBoxLayout* button_row = new QHBoxLayout;
-    slice_reslice_button_ = new QPushButton(QStringLiteral("重新切片…"), contents);
+    button_row->setContentsMargins(0, 4, 0, 0);
+    button_row->setSpacing(8);
+    slice_reslice_button_ = FluentUi::MakeButton(
+        contents, QStringLiteral("重新切片…"), FluentUi::ButtonKind::Accent);
     slice_reslice_button_->setObjectName(QStringLiteral("sliceResliceButton"));
     slice_reslice_button_->setEnabled(false);
     button_row->addWidget(slice_reslice_button_);
-    slice_export_button_ = new QPushButton(QStringLiteral("导出切片…"), contents);
+    slice_export_button_ = FluentUi::MakeButton(contents, QStringLiteral("导出切片…"));
     slice_export_button_->setObjectName(QStringLiteral("sliceExportButton"));
     slice_export_button_->setEnabled(false);
     slice_export_button_->setToolTip(
         QStringLiteral("把当前切片预览导出为 .slmslice 或 CLI 文件"));
     button_row->addWidget(slice_export_button_);
-    slice_clear_button_ = new QPushButton(QStringLiteral("清除"), contents);
+    slice_clear_button_ = FluentUi::MakeButton(
+        contents, QStringLiteral("清除"), FluentUi::ButtonKind::Subtle);
     slice_clear_button_->setObjectName(QStringLiteral("sliceClearButton"));
     slice_clear_button_->setEnabled(false);
     button_row->addWidget(slice_clear_button_);
     layout->addLayout(button_row);
 
-    QLabel* note = new QLabel(
+    QLabel* note = FluentUi::MakeLabel(
+        contents,
         QStringLiteral("可导出或打开 .slmslice / CLI；预览不写入工程，导出不进入撤销记录。"),
-        contents);
+        FluentUi::TextRole::Caption, true);
     note->setObjectName(QStringLiteral("slicePreviewNote"));
     note->setWordWrap(true);
     note->setTextFormat(Qt::PlainText);
@@ -1725,14 +1721,14 @@ void SceneEditorWindow::GenerateSlice()
     QDialog dialog(this);
     dialog.setObjectName(QStringLiteral("sliceSettingsDialog"));
     dialog.setWindowTitle(QStringLiteral("生成切片"));
-    dialog.setWindowFlag(Qt::WindowContextHelpButtonHint, false);
-    dialog.setFont(QFont(QStringLiteral("Microsoft YaHei"), 11));
     dialog.setMinimumWidth(460);
+    FluentUi::DialogParts parts = FluentUi::BuildDialog(
+        dialog, QStringLiteral("生成切片"),
+        QStringLiteral("按平台坐标切片所有模型（包括隐藏模型），只生成轮廓和填充预览。"),
+        QStringLiteral("生成"), QStringLiteral("取消"));
 
-    QVBoxLayout* layout = new QVBoxLayout(&dialog);
-    layout->setContentsMargins(22, 20, 22, 20);
-    layout->setSpacing(14);
     QFormLayout* form = new QFormLayout;
+    form->setVerticalSpacing(12);
     auto* thickness = new QDoubleSpinBox(&dialog);
     thickness->setObjectName(QStringLiteral("sliceLayerThicknessSpin"));
     thickness->setRange(kMinLayerThicknessMm, kMaxLayerThicknessMm);
@@ -1741,17 +1737,18 @@ void SceneEditorWindow::GenerateSlice()
     thickness->setSuffix(QStringLiteral(" mm"));
     thickness->setValue(slice_layer_thickness_mm_);
     form->addRow(QStringLiteral("层厚"), thickness);
-    QLabel* estimate_label = new QLabel(&dialog);
+    QLabel* estimate_label = FluentUi::MakeValueLabel(
+        &dialog, QString(), FluentUi::TextRole::Caption, true);
     estimate_label->setWordWrap(true);
     estimate_label->setTextFormat(Qt::PlainText);
     form->addRow(QStringLiteral("预计"), estimate_label);
-    layout->addLayout(form);
+    parts.body->addLayout(form);
 
     QGroupBox* hatch_group = new QGroupBox(QStringLiteral("填充"), &dialog);
     hatch_group->setObjectName(QStringLiteral("sliceHatchGroup"));
     QVBoxLayout* hatch_layout = new QVBoxLayout(hatch_group);
-    QCheckBox* hatch_enabled =
-        new QCheckBox(QStringLiteral("启用填充"), hatch_group);
+    auto* hatch_enabled =
+        new fluent::basicinput::CheckBox(QStringLiteral("启用填充"), hatch_group);
     hatch_enabled->setObjectName(QStringLiteral("sliceHatchEnabledCheck"));
     hatch_enabled->setChecked(slice_hatch_enabled_);
     hatch_layout->addWidget(hatch_enabled);
@@ -1782,7 +1779,7 @@ void SceneEditorWindow::GenerateSlice()
     hatch_increment->setValue(slice_hatch_layer_increment_deg_);
     hatch_form->addRow(QStringLiteral("层间角度增量"), hatch_increment);
     hatch_layout->addLayout(hatch_form);
-    layout->addWidget(hatch_group);
+    parts.body->addWidget(hatch_group);
     auto update_hatch_fields = [hatch_enabled, hatch_spacing,
                                 hatch_angle, hatch_increment]()
     {
@@ -1795,14 +1792,14 @@ void SceneEditorWindow::GenerateSlice()
             [update_hatch_fields](bool) { update_hatch_fields(); });
     update_hatch_fields();
 
-    QLabel* note = new QLabel(
-        QStringLiteral("按平台坐标切片所有模型（包括隐藏模型）；只生成轮廓和填充预览，"
-                       "不导出文件，也不进入撤销记录。模型低于 Z=0 的部分不切。"
-                       "填充线会穿透模型显示。"),
-        &dialog);
+    QLabel* note = FluentUi::MakeLabel(
+        &dialog,
+        QStringLiteral("只生成轮廓和填充预览，不导出文件，也不进入撤销记录。"
+                       "模型低于 Z=0 的部分不切。填充线会穿透模型显示。"),
+        FluentUi::TextRole::Caption, true);
     note->setWordWrap(true);
     note->setTextFormat(Qt::PlainText);
-    layout->addWidget(note);
+    parts.body->addWidget(note);
 
     auto update_estimate = [&]()
     {
@@ -1823,15 +1820,8 @@ void SceneEditorWindow::GenerateSlice()
             &dialog, [&](double) { update_estimate(); });
     update_estimate();
 
-    QDialogButtonBox* buttons = new QDialogButtonBox(
-        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    if (QPushButton* ok_button = buttons->button(QDialogButtonBox::Ok))
-        ok_button->setText(QStringLiteral("生成"));
-    if (QPushButton* cancel_button = buttons->button(QDialogButtonBox::Cancel))
-        cancel_button->setText(QStringLiteral("取消"));
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(buttons);
+    connect(parts.primary, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(parts.secondary, &QPushButton::clicked, &dialog, &QDialog::reject);
 
     if (dialog.exec() != QDialog::Accepted)
         return;
@@ -2374,7 +2364,7 @@ void SceneEditorWindow::RefreshModelList()
             order_spin->setRange(1, static_cast<int>(infos.size()));
             order_spin->setValue(static_cast<int>(index) + 1);
             order_spin->setAlignment(Qt::AlignCenter);
-            order_spin->setFixedWidth(64);
+            order_spin->setFixedWidth(52);
             order_spin->setKeyboardTracking(false);
             order_spin->setToolTip(QStringLiteral(
                 "模型序号（切片顺序）：修改后模型会移动到该位置，切片按列表顺序生成；可撤销/回撤"));
@@ -2508,11 +2498,11 @@ void SceneEditorWindow::RefreshModelList()
                 support_name->setObjectName(QStringLiteral("supportRowName"));
                 support_name->setTextFormat(Qt::PlainText);
                 support_name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+                // 隐藏的支撑用 Fluent 的禁用文字色标记，跟随主题而不是写死调色板。
                 QPalette name_palette = support_name->palette();
                 name_palette.setColor(QPalette::WindowText,
-                    model_list_->palette().color(
-                        support.visible ? QPalette::Active : QPalette::Disabled,
-                        QPalette::Text));
+                    support.visible ? FluentUi::CurrentTokens().text_primary
+                                    : FluentUi::CurrentTokens().text_disabled);
                 support_name->setPalette(name_palette);
                 support_layout->addWidget(support_name, 1);
                 QToolButton* toggle = new QToolButton(support_row);
@@ -2540,9 +2530,8 @@ void SceneEditorWindow::RefreshModelList()
                                                    : QStringLiteral("显示该支撑"));
                         QPalette palette = support_name->palette();
                         palette.setColor(QPalette::WindowText,
-                            model_list_->palette().color(
-                                visible ? QPalette::Active : QPalette::Disabled,
-                                QPalette::Text));
+                            visible ? FluentUi::CurrentTokens().text_primary
+                                    : FluentUi::CurrentTokens().text_disabled);
                         support_name->setPalette(palette);
                         statusBar()->showMessage(
                             (visible ? QStringLiteral("已显示 ")
@@ -2650,12 +2639,14 @@ void SceneEditorWindow::UpdateModelSelection(bool force)
         auto* name_label = row->findChild<QLabel*>(QStringLiteral("modelRowName"));
         name_label->setText(info.name);
         QPalette name_palette = name_label->palette();
-        name_palette.setColor(QPalette::WindowText, model_list_->palette().color(
-            info.visible ? QPalette::Active : QPalette::Disabled, QPalette::Text));
+        name_palette.setColor(QPalette::WindowText,
+            info.visible ? FluentUi::CurrentTokens().text_primary
+                         : FluentUi::CurrentTokens().text_disabled);
         name_label->setPalette(name_palette);
         QPalette palette = row->palette();
-        palette.setColor(QPalette::Window, info.selected ? QColor(214, 234, 255)
-            : model_list_->palette().color(QPalette::Base));
+        palette.setColor(QPalette::Window,
+            info.selected ? FluentUi::CurrentTokens().accent_subtle
+                          : FluentUi::CurrentTokens().solid);
         row->setPalette(palette);
     }
     if (force || details_id != last_details_model_id_ || (details_id && model_name_label_->text() != current->name))
@@ -2690,7 +2681,7 @@ void SceneEditorWindow::UpdateModelDetails()
                                    model_scale_labels_, model_rotation_labels_})
             for (QLabel* label : labels)
                 label->setText(QStringLiteral("—"));
-        model_path_edit_->setPlainText(QStringLiteral("—"));
+        model_path_edit_->setText(QStringLiteral("—"));
         model_path_edit_->setToolTip(QString());
         UpdateModelTransformDialog();
         return;
@@ -2700,8 +2691,9 @@ void SceneEditorWindow::UpdateModelDetails()
     const QFileInfo file(path);
     model_name_label_->setText(info->name);
     model_name_label_->setToolTip(info->name);
-    model_path_edit_->setPlainText(QDir::toNativeSeparators(file.absoluteFilePath()));
-    model_path_edit_->setToolTip(model_path_edit_->toPlainText());
+    model_path_edit_->setText(QDir::toNativeSeparators(file.absoluteFilePath()));
+    model_path_edit_->setToolTip(model_path_edit_->text());
+    model_path_edit_->setCursorPosition(0);
     model_file_size_label_->setText(FormatFileSize(static_cast<qint64>(info->source_file_size)));
     model_triangles_label_->setText(
         QLocale().toString(static_cast<qulonglong>(info->triangle_count)));
@@ -2763,30 +2755,27 @@ void SceneEditorWindow::RenameModel(std::uint64_t id)
     QDialog dialog(this);
     dialog.setObjectName(QStringLiteral("renameModelDialog"));
     dialog.setWindowTitle(QStringLiteral("修改模型名称"));
-    dialog.setWindowFlag(Qt::WindowContextHelpButtonHint, false);
-    dialog.setFont(QFont(QStringLiteral("Microsoft YaHei"), 11));
     dialog.setMinimumWidth(480);
-    auto* layout = new QVBoxLayout(&dialog);
-    layout->setContentsMargins(22, 20, 22, 20);
-    layout->setSpacing(14);
+    FluentUi::DialogParts parts = FluentUi::BuildDialog(
+        dialog, QStringLiteral("修改模型名称"),
+        QStringLiteral("名称不能为空，且不能重名。"),
+        QStringLiteral("确定"), QStringLiteral("取消"));
     auto* form = new QFormLayout;
+    form->setVerticalSpacing(10);
     auto* name = new QLineEdit(initial_name, &dialog);
     name->setObjectName(QStringLiteral("modelNameEdit"));
     name->setMaxLength(ModelNames::kMaxLength);
-    name->setMinimumHeight(34);
+    name->setMinimumHeight(32);
     form->addRow(QStringLiteral("模型名称"), name);
-    layout->addLayout(form);
-    auto* hint = new QLabel(QStringLiteral("名称不能为空，且不能重名。"), &dialog);
+    parts.body->addLayout(form);
+    QLabel* hint = FluentUi::MakeValueLabel(&dialog, QString(), FluentUi::TextRole::Caption, true);
     hint->setObjectName(QStringLiteral("modelNameHint"));
     hint->setTextFormat(Qt::PlainText);
     hint->setWordWrap(true);
-    layout->addWidget(hint);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    auto* apply = buttons->button(QDialogButtonBox::Ok);
+    parts.body->addWidget(hint);
+    QPushButton* apply = parts.primary;
     apply->setObjectName(QStringLiteral("renameModelButton"));
-    apply->setText(QStringLiteral("确定"));
-    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&]()
+    connect(parts.primary, &QPushButton::clicked, &dialog, [&]()
     {
         QString error;
         if (!viewport_.RenameModel(id, name->text(), error))
@@ -2798,8 +2787,7 @@ void SceneEditorWindow::RenameModel(std::uint64_t id)
         }
         dialog.accept();
     });
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(buttons);
+    connect(parts.secondary, &QPushButton::clicked, &dialog, &QDialog::reject);
     name->setFocus();
     name->selectAll();
     if (dialog.exec() != QDialog::Accepted) return;

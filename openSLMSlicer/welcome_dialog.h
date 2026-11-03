@@ -6,9 +6,13 @@
 #include "project_file.h"
 #include "recent_projects.h"
 
-class QLabel;
 class QListWidget;
 class QShowEvent;
+
+namespace fluent::textfields
+{
+class Label;
+}
 
 // The editor and its OpenGL viewport are created only after this dialog accepts.
 class WelcomeDialog : public QDialog
@@ -28,7 +32,7 @@ private:
     QString project_path_;
     QString recent_projects_file_;
     QListWidget* recent_list_ = nullptr;
-    QLabel* recent_empty_label_ = nullptr;
+    fluent::textfields::Label* recent_empty_label_ = nullptr;
     ProjectData initial_project_;
 };
 
